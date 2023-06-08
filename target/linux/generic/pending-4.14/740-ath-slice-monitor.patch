@@ -1,0 +1,62 @@
+--- a/net/mac80211/iface.c
++++ b/net/mac80211/iface.c
+@@ -1203,9 +1203,6 @@ static u16 ieee80211_monitor_select_queu
+ 	struct ieee80211_hdr *hdr;
+ 	struct ieee80211_radiotap_header *rtap = (void *)skb->data;
+ 
+-	if (local->hw.queues < IEEE80211_NUM_ACS)
+-		return 0;
+-
+ 	if (skb->len < 4 ||
+ 	    skb->len < le16_to_cpu(rtap->it_len) + 2 /* frame control */)
+ 		return 0; /* doesn't matter, frame will be dropped */
+--- a/net/mac80211/tx.c
++++ b/net/mac80211/tx.c
+@@ -34,6 +34,7 @@
+ #include "ieee80211_i.h"
+ #include "driver-ops.h"
+ #include "led.h"
++#include "linux/ieee80211.h"
+ #include "mesh.h"
+ #include "wep.h"
+ #include "wpa.h"
+@@ -1257,7 +1258,7 @@ static struct txq_info *ieee80211_get_tx
+ 		return NULL;
+ 
+ 	if (sta) {
+-		if (skb->priority > IEEE80211_NUM_TIDS) {
++		if (skb->priority < EMPOWER_NUM_SLICE) {
+ 			tid = skb->priority;
+ 		} else {
+ 			tid = skb->priority & IEEE80211_QOS_CTL_TID_MASK;
+--- a/net/mac80211/wme.c
++++ b/net/mac80211/wme.c
+@@ -17,6 +17,7 @@
+ 
+ #include <net/mac80211.h>
+ #include "ieee80211_i.h"
++#include "linux/ieee80211.h"
+ #include "wme.h"
+ 
+ /* Default mapping in classifier to work with default
+@@ -123,8 +124,9 @@ u16 ieee80211_select_queue_80211(struct
+ 	struct ieee80211_local *local = sdata->local;
+ 	u8 *p;
+ 
+-	if (local->hw.queues < IEEE80211_NUM_ACS)
+-		return 0;
++	if (skb->priority < EMPOWER_NUM_SLICE) {
++		return skb->priority;
++	}
+ 
+ 	if (!ieee80211_is_data(hdr->frame_control)) {
+ 		skb->priority = 7;
+@@ -242,7 +244,7 @@ void ieee80211_set_qos_hdr(struct ieee80
+ 
+ 	// TID == AC == SLICE => Can't fit into 4 bits (we have 6)
+ 	// Default to 0 in QOS header
+-	if (skb->priority > IEEE80211_NUM_TIDS) {
++	if (skb->priority >= IEEE80211_NUM_TIDS) {
+ 		tid = 0;
+ 	} else {
+ 		tid = skb->priority & IEEE80211_QOS_CTL_TAG1D_MASK;

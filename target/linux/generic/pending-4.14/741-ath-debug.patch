@@ -1,0 +1,49 @@
+--- a/drivers/net/wireless/ath/ath9k/xmit.c
++++ b/drivers/net/wireless/ath/ath9k/xmit.c
+@@ -2000,6 +2000,7 @@ void ath_txq_schedule(struct ath_softc *
+ 	struct list_head *tid_list;
+ 	struct ath_acq *acq;
+ 	int ret;
++	ath_dbg(common, XMIT, "Scheduling for TXQ [%u], currently serving slice [%u]", txq->axq_qnum, txq->current_slice);
+ 
+ 	if (test_bit(ATH_OP_HW_RESET, &common->op_flags))
+ 		return;
+@@ -2016,9 +2017,11 @@ search:
+ 		goto out;
+ 
+ 	tid = list_first_entry(tid_list, struct ath_atx_tid, list);
++	ath_dbg(common, XMIT, "Trying to schedule [%u] for TX...", tid);
+ 
+ 	// If the given TID has nothing to be sent
+ 	if (!ath_tid_has_buffered(tid)) {
++		ath_dbg(common, XMIT, "[%u] does not have anything to send!", tid);
+ 		spin_lock_bh(&acq->lock);
+ 		list_del_init(&tid->list);
+ 		spin_unlock_bh(&acq->lock);
+@@ -2027,13 +2030,17 @@ search:
+ 
+ 	// Can't schedule anything
+ 	if (txq->current_slice != tid->tidno && !ath9k_has_pending_frames(sc, txq, false)) {
++		ath_dbg(common, XMIT, "Queue is currently empty and has different slice, reconfiguring...");
+ 		ret = ath9k_configure_queue_for_slice(sc, tid->tidno, txq);
+-		if (!ret) 
++		if (!ret) {
++			ath_err(common, XMIT, "Error reconfiguring slice!");
+ 			goto out;
++		}
+ 
+ 		txq->current_slice = tid->tidno;
+ 	} else if (txq->current_slice != tid->tidno && ath9k_has_pending_frames(sc, txq, false)) {
+ 		// We can't TX and we also can't change the queue props
++		ath_dbg(common, XMIT, "Queue is busy AND misconfigured, skipping");
+ 		goto out;
+ 	}
+ 
+@@ -2047,7 +2054,6 @@ search:
+ out:
+ 	rcu_read_unlock();
+ 	spin_unlock_bh(&sc->chan_lock);
+-
+ }
+ 
+ /* For each acq entry, for each tid, try to schedule packets
