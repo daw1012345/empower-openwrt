@@ -1,0 +1,114 @@
+--- a/include/net/mac80211.h
++++ b/include/net/mac80211.h
+@@ -129,6 +129,7 @@
+ 
+ struct device;
+ 
++#define EMPOWER_NUM_SLICE 		64
+ /**
+  * enum ieee80211_max_queues - maximum number of queues
+  *
+@@ -1896,7 +1897,7 @@ struct ieee80211_sta {
+ 	bool support_p2p_ps;
+ 	u16 max_rc_amsdu_len;
+ 
+-	struct ieee80211_txq *txq[IEEE80211_NUM_TIDS];
++	struct ieee80211_txq *txq[EMPOWER_NUM_SLICE];
+ 
+ 	/* must be last */
+ 	u8 drv_priv[0] __aligned(sizeof(void *));
+--- a/net/mac80211/iface.c
++++ b/net/mac80211/iface.c
+@@ -1246,9 +1246,6 @@ static u16 ieee80211_monitor_select_queu
+ 	struct ieee80211_hdr *hdr;
+ 	struct ieee80211_radiotap_header *rtap = (void *)skb->data;
+ 
+-	if (local->hw.queues < IEEE80211_NUM_ACS)
+-		return 0;
+-
+ 	if (skb->len < 4 ||
+ 	    skb->len < le16_to_cpu(rtap->it_len) + 2 /* frame control */)
+ 		return 0; /* doesn't matter, frame will be dropped */
+--- a/net/mac80211/tx.c
++++ b/net/mac80211/tx.c
+@@ -1247,6 +1247,7 @@ static struct txq_info *ieee80211_get_tx
+ 	struct ieee80211_hdr *hdr = (struct ieee80211_hdr *) skb->data;
+ 	struct ieee80211_tx_info *info = IEEE80211_SKB_CB(skb);
+ 	struct ieee80211_txq *txq = NULL;
++	u8 tid;
+ 
+ 	if ((info->flags & IEEE80211_TX_CTL_SEND_AFTER_DTIM) ||
+ 	    (info->control.flags & IEEE80211_TX_CTRL_PS_RESPONSE))
+@@ -1256,7 +1257,10 @@ static struct txq_info *ieee80211_get_tx
+ 		return NULL;
+ 
+ 	if (sta) {
+-		u8 tid = skb->priority & IEEE80211_QOS_CTL_TID_MASK;
++		if (skb->priority < EMPOWER_NUM_SLICE)
++			tid = skb->priority;
++		else
++			tid = skb->priority & IEEE80211_QOS_CTL_TID_MASK;
+ 
+ 		if (!sta->uploaded)
+ 			return NULL;
+@@ -1897,8 +1901,7 @@ static bool ieee80211_tx(struct ieee8021
+ 	/* set up hw_queue value early */
+ 	if (!(info->flags & IEEE80211_TX_CTL_TX_OFFCHAN) ||
+ 	    !ieee80211_hw_check(&local->hw, QUEUE_CONTROL))
+-		info->hw_queue =
+-			sdata->vif.hw_queue[skb_get_queue_mapping(skb)];
++		info->hw_queue = 0;
+ 
+ 	if (invoke_tx_handlers_early(&tx))
+ 		return true;
+@@ -3420,7 +3423,11 @@ static bool ieee80211_xmit_fast(struct i
+ 	info->control.flags = IEEE80211_TX_CTRL_FAST_XMIT;
+ 
+ 	if (hdr->frame_control & cpu_to_le16(IEEE80211_STYPE_QOS_DATA)) {
+-		tid = skb->priority & IEEE80211_QOS_CTL_TAG1D_MASK;
++		if (skb->priority & ~IEEE80211_QOS_CTL_TAG1D_MASK > 0) {
++			tid = 0;
++		} else {
++			tid = skb->priority & IEEE80211_QOS_CTL_TAG1D_MASK;
++		}
+ 		*ieee80211_get_qos_ctl(hdr) = tid;
+ 	}
+ 
+--- a/net/mac80211/wme.c
++++ b/net/mac80211/wme.c
+@@ -123,8 +123,9 @@ u16 ieee80211_select_queue_80211(struct
+ 	struct ieee80211_local *local = sdata->local;
+ 	u8 *p;
+ 
+-	if (local->hw.queues < IEEE80211_NUM_ACS)
+-		return 0;
++	if (skb->priority < EMPOWER_NUM_SLICE) {
++		return skb->priority;
++	}
+ 
+ 	if (!ieee80211_is_data(hdr->frame_control)) {
+ 		skb->priority = 7;
+@@ -134,6 +135,7 @@ u16 ieee80211_select_queue_80211(struct
+ 		skb->priority = 0;
+ 		return ieee802_1d_to_ac[skb->priority];
+ 	}
++	
+ 
+ 	p = ieee80211_get_qos_ctl(hdr);
+ 	skb->priority = *p & IEEE80211_QOS_CTL_TAG1D_MASK;
+@@ -243,7 +245,14 @@ void ieee80211_set_qos_hdr(struct ieee80
+ {
+ 	struct ieee80211_hdr *hdr = (void *)skb->data;
+ 	struct ieee80211_tx_info *info = IEEE80211_SKB_CB(skb);
+-	u8 tid = skb->priority & IEEE80211_QOS_CTL_TAG1D_MASK;
++	u8 tid;
++
++	if (skb->priority & ~IEEE80211_QOS_CTL_TAG1D_MASK > 0) {
++		tid = 0;
++	} else {
++		tid = skb->priority & IEEE80211_QOS_CTL_TAG1D_MASK;
++	}
++
+ 	u8 flags;
+ 	u8 *p;
+ 
