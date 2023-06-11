@@ -38,7 +38,7 @@
 +	struct list_head list;
 +	// For the slice_config
 +	spinlock_t slice_cfg_lock;
-+	struct ieee80211_tx_queue_params slice_config;
++	struct ath9k_tx_queue_info slice_config;
 +};
 +
  /**
@@ -199,12 +199,12 @@
 +		spin_lock_init(&sc->tx.slices[i].slice_cfg_lock);
 +		INIT_LIST_HEAD(&sc->tx.slices[i].list);
 +		__skb_queue_head_init(&sc->tx.slices[i].queue);
-+		sc->tx.slices[i].slice_config.txop = 0;
-+		sc->tx.slices[i].slice_config.cw_min = ATH9K_TXQ_USEDEFAULT;
-+		sc->tx.slices[i].slice_config.cw_max = ATH9K_TXQ_USEDEFAULT;
-+		sc->tx.slices[i].slice_config.aifs = ATH9K_TXQ_USEDEFAULT;
-+		sc->tx.slices[i].slice_config.uapsd = false;
-+		sc->tx.slices[i].slice_config.mu_edca = false;
++		sc->tx.slices[i].slice_config.tqi_subtype = i;
++		sc->tx.slices[i].slice_config.tqi_aifs = ATH9K_TXQ_USEDEFAULT;
++		sc->tx.slices[i].slice_config.tqi_cwmin = ATH9K_TXQ_USEDEFAULT;
++		sc->tx.slices[i].slice_config.tqi_cwmax = ATH9K_TXQ_USEDEFAULT;
++		sc->tx.slices[i].slice_config.tqi_physCompBuf = 0;
++		sc->tx.slices[i].slice_config.tqi_burstTime = 0;
 +	}
 +
  	timer_setup(&sc->sleep_timer, ath_ps_full_sleep, 0);
@@ -358,7 +358,7 @@
  	else
  		vif->cab_queue = IEEE80211_INVAL_HW_QUEUE;
  }
-@@ -1646,31 +1665,58 @@ static int ath9k_conf_tx(struct ieee8021
+@@ -1646,31 +1665,59 @@ static int ath9k_conf_tx(struct ieee8021
  {
  	struct ath_softc *sc = hw->priv;
  	struct ath_common *common = ath9k_hw_common(sc->sc_ah);
@@ -369,21 +369,20 @@
  
 -	if (queue >= IEEE80211_NUM_ACS)
 -		return 0;
-+	ath9k_ps_wakeup(sc);
-+	mutex_lock(&sc->mutex);
- 
--	txq = sc->tx.txq_map[queue];
-+	spin_lock_bh(&sc->tx.slices[queue].slice_cfg_lock);
-+	sc->tx.slices[queue].slice_config.txop = params->txop;
-+	sc->tx.slices[queue].slice_config.cw_min = params->cw_min;
-+	sc->tx.slices[queue].slice_config.cw_max = params->cw_max;
-+	sc->tx.slices[queue].slice_config.aifs = params->aifs;
-+	spin_unlock_bh(&sc->tx.slices[queue].slice_cfg_lock);
-+
-+	ath_dbg(common, CONFIG,
-+		"Saving slice config [%d], aifs: %d, cw_min: %d, cw_max: %d, txop: %d\n",
++	printk(KERN_ERR "Saving slice config [%d], aifs: %d, cw_min: %d, cw_max: %d, txop: %d\n",
 +		queue, params->aifs, params->cw_min,
 +		params->cw_max, params->txop);
+ 
+-	txq = sc->tx.txq_map[queue];
++
++	mutex_lock(&sc->mutex);
++
++	spin_lock_bh(&sc->tx.slices[queue].slice_cfg_lock);
++	sc->tx.slices[queue].slice_config.tqi_burstTime = params->txop * 32;
++	sc->tx.slices[queue].slice_config.tqi_cwmin = params->cw_min;
++	sc->tx.slices[queue].slice_config.tqi_cwmax = params->cw_max;
++	sc->tx.slices[queue].slice_config.tqi_aifs = params->aifs;
++	spin_unlock_bh(&sc->tx.slices[queue].slice_cfg_lock);
 +
 +	for (i = 0; i < ATH_NUM_DATA_TX_QUEUES; i++) {
 +		ath_txq_lock(sc, &sc->tx.txq[i]);
@@ -393,13 +392,15 @@
 +		ath_txq_unlock(sc, &sc->tx.txq[i]);
 +	}
 +
++	mutex_unlock(&sc->mutex);
++
 +	return 0;
 +}
 +
 +int ath9k_configure_queue_for_slice(struct ath_softc *sc, u16 slice, struct ath_txq *txq)
 +{
 +	struct ath_common *common = ath9k_hw_common(sc->sc_ah);
-+	struct ieee80211_tx_queue_params *params = &sc->tx.slices[slice].slice_config;
++	struct ath9k_tx_queue_info *params = &sc->tx.slices[slice].slice_config;
 +	struct ath9k_tx_queue_info qi;
 +	int ret = 0;
  
@@ -408,19 +409,25 @@
  
  	memset(&qi, 0, sizeof(struct ath9k_tx_queue_info));
  
-+	spin_lock_bh(&sc->tx.slices[slice].slice_cfg_lock);	
- 	qi.tqi_aifs = params->aifs;
- 	qi.tqi_cwmin = params->cw_min;
- 	qi.tqi_cwmax = params->cw_max;
- 	qi.tqi_burstTime = params->txop * 32;
-+	spin_unlock_bh(&sc->tx.slices[slice].slice_cfg_lock);	
- 
+-	qi.tqi_aifs = params->aifs;
+-	qi.tqi_cwmin = params->cw_min;
+-	qi.tqi_cwmax = params->cw_max;
+-	qi.tqi_burstTime = params->txop * 32;
+-
 -	ath_dbg(common, CONFIG,
 -		"Configure tx [queue/halq] [%d/%d], aifs: %d, cw_min: %d, cw_max: %d, txop: %d\n",
 -		queue, txq->axq_qnum, params->aifs, params->cw_min,
-+	printk(KERN_ERR "Configure tx [slice/queue] [%d/%d], aifs: %d, cw_min: %d, cw_max: %d, txop: %d\n",
-+		slice, txq->axq_qnum, params->aifs, params->cw_min,
- 		params->cw_max, params->txop);
+-		params->cw_max, params->txop);
++	spin_lock_bh(&sc->tx.slices[slice].slice_cfg_lock);	
++	qi.tqi_aifs = params->tqi_aifs;
++	qi.tqi_cwmin = params->tqi_cwmin;
++	qi.tqi_cwmax = params->tqi_cwmax;
++	qi.tqi_burstTime = params->tqi_burstTime;
++	spin_unlock_bh(&sc->tx.slices[slice].slice_cfg_lock);	
++
++	printk(KERN_ERR "Configure tx [slice/queue] [%d/%d], aifs: %d, cw_min: %d, cw_max: %d, txop*32: %d\n",
++		slice, txq->axq_qnum, params->tqi_aifs, params->tqi_cwmin,
++		params->tqi_cwmax, params->tqi_burstTime);
  
 -	ath_update_max_aggr_framelen(sc, queue, qi.tqi_burstTime);
 +	ath_update_max_aggr_framelen(sc, slice, qi.tqi_burstTime);
@@ -577,13 +584,12 @@
  
 -	if (test_bit(ATH_OP_HW_RESET, &common->op_flags))
 -		return;
-+	printk(KERN_ERR "Scheduling for TXQ [%u], currently serving slice [%u]\n", txq->axq_qnum, txq->current_slice);
++	// printk(KERN_ERR "Scheduling for TXQ [%u], currently serving slice [%u]\n", txq->axq_qnum, txq->current_slice);
  
 -	spin_lock_bh(&sc->chan_lock);
 -	rcu_read_lock();
 -	acq = &sc->cur_chan->acq[txq->mac80211_qnum];
 +	spin_lock_irqsave(&sc->tx.tid_queue_lock, flags);
-+	printk(KERN_ERR "Past the lock!\n");
  
 -	if (sc->cur_chan->stopped)
 -		goto out;
@@ -660,16 +666,17 @@
 -			spin_unlock_bh(&acq->lock);
 +	while ((skb = __skb_dequeue(&slice->queue))) {
 +		if(ath_tx_start(sc->hw, skb, &txctl)) {
++			printk(KERN_ERR "Failed to send!\n");
 +			list_move_tail(&slice->list, tid_list);
  		}
 -		goto begin;
++		printk(KERN_ERR "Sent packet!\n");
  	}
  
  out:
 -	rcu_read_unlock();
 -	spin_unlock_bh(&sc->chan_lock);
 +	spin_unlock_irqrestore(&sc->tx.tid_queue_lock, flags);
-+	printk(KERN_ERR "Unlocking...!\n");
 +	return;
  }
  
@@ -997,3 +1004,51 @@
  
  /** Returns string describing opmode, or NULL if unknown mode. */
  const char *ath_opmode_to_string(enum nl80211_iftype opmode);
+--- a/net/mac80211/cfg.c
++++ b/net/mac80211/cfg.c
+@@ -2116,9 +2116,6 @@ static int ieee80211_set_txq_params(stru
+ 	if (!local->ops->conf_tx)
+ 		return -EOPNOTSUPP;
+ 
+-	if (local->hw.queues < IEEE80211_NUM_ACS)
+-		return -EOPNOTSUPP;
+-
+ 	memset(&p, 0, sizeof(p));
+ 	p.aifs = params->aifs;
+ 	p.cw_max = params->cwmax;
+@@ -2131,7 +2128,7 @@ static int ieee80211_set_txq_params(stru
+ 	 */
+ 	p.uapsd = false;
+ 
+-	ieee80211_regulatory_limit_wmm_params(sdata, &p, params->ac);
++	// ieee80211_regulatory_limit_wmm_params(sdata, &p, params->ac);
+ 
+ 	sdata->tx_conf[params->ac] = p;
+ 	if (drv_conf_tx(local, sdata, params->ac, &p)) {
+--- a/net/wireless/nl80211.c
++++ b/net/wireless/nl80211.c
+@@ -2570,9 +2570,9 @@ static int nl80211_set_wiphy(struct sk_b
+ 		if (!netdev)
+ 			return -EINVAL;
+ 
+-		if (netdev->ieee80211_ptr->iftype != NL80211_IFTYPE_AP &&
+-		    netdev->ieee80211_ptr->iftype != NL80211_IFTYPE_P2P_GO)
+-			return -EINVAL;
++		// if (netdev->ieee80211_ptr->iftype != NL80211_IFTYPE_AP &&
++		//     netdev->ieee80211_ptr->iftype != NL80211_IFTYPE_P2P_GO)
++		// 	return -EINVAL;
+ 
+ 		if (!netif_running(netdev))
+ 			return -ENETDOWN;
+--- a/net/mac80211/driver-ops.c
++++ b/net/mac80211/driver-ops.c
+@@ -166,9 +166,6 @@ int drv_conf_tx(struct ieee80211_local *
+ 
+ 	might_sleep();
+ 
+-	if (!check_sdata_in_driver(sdata))
+-		return -EIO;
+-
+ 	if (params->cw_min == 0 || params->cw_min > params->cw_max) {
+ 		/*
+ 		 * If we can't configure hardware anyway, don't warn. We may
