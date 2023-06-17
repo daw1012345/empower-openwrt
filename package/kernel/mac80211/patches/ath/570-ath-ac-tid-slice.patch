@@ -28,15 +28,13 @@
  	u32 airtime_rx_start;
  
  #ifdef CPTCFG_ATH9K_STATION_STATISTICS
-@@ -286,6 +291,15 @@ struct ath_tx_control {
+@@ -286,6 +291,13 @@ struct ath_tx_control {
  };
  
  
 +struct ath_empower_slice {
 +	u8 slice;
-+	struct sk_buff_head queue;
-+	struct list_head list;
-+	// For the slice_config
++
 +	spinlock_t slice_cfg_lock;
 +	struct ath9k_tx_queue_info slice_config;
 +};
@@ -44,22 +42,25 @@
  /**
   * @txq_map:  Index is mac80211 queue number.  This is
   *  not necessarily the same as the hardware queue number
-@@ -299,7 +313,13 @@ struct ath_tx {
+@@ -299,7 +311,16 @@ struct ath_tx {
  	struct ath_descdma txdma;
  	struct ath_txq *txq_map[IEEE80211_NUM_ACS];
  	struct ath_txq *uapsdq;
 -	u16 max_aggr_framelen[IEEE80211_NUM_ACS][4][32];
-+	// TODO: Refactor this into ath_empower_slice?
 +	u16 max_aggr_framelen[EMPOWER_NUM_SLICE][4][32];
 +
 +	struct ath_empower_slice slices[EMPOWER_NUM_SLICE];
 +	
-+	spinlock_t tid_queue_lock;
-+	struct list_head tid_queue;
++	spinlock_t queue_lock;
++	struct sk_buff_head queue;
++
++	// The following needs no locking due to serialized access
++	u64 handled_slices;
++	u16 inactive_queues;
  };
  
  struct ath_rx_edma {
-@@ -336,7 +356,7 @@ struct ath_acq {
+@@ -336,7 +357,7 @@ struct ath_acq {
  struct ath_chanctx {
  	struct cfg80211_chan_def chandef;
  	struct list_head vifs;
@@ -68,7 +69,7 @@
  	int hw_queue_base;
  
  	/* do not dereference, use for comparison only */
-@@ -440,10 +460,7 @@ ath_node_to_tid(struct ath_node *an, u8
+@@ -440,10 +461,7 @@ ath_node_to_tid(struct ath_node *an, u8
  	struct ieee80211_txq *txq;
  
  	BUG_ON(!vif);
@@ -80,7 +81,7 @@
  
  	return (struct ath_atx_tid *) txq->drv_priv;
  }
-@@ -458,7 +475,7 @@ ath_node_to_tid(struct ath_node *an, u8
+@@ -458,7 +476,7 @@ ath_node_to_tid(struct ath_node *an, u8
  void ath_chanctx_init(struct ath_softc *sc);
  void ath_chanctx_set_channel(struct ath_softc *sc, struct ath_chanctx *ctx,
  			     struct cfg80211_chan_def *chandef);
@@ -89,7 +90,16 @@
  #ifdef CPTCFG_ATH9K_CHANNEL_CONTEXT
  
  static inline struct ath_chanctx *
-@@ -684,6 +701,8 @@ void ath9k_calculate_iter_data(struct at
+@@ -593,7 +611,7 @@ bool ath_drain_all_txq(struct ath_softc
+ void ath_draintxq(struct ath_softc *sc, struct ath_txq *txq);
+ void ath_tx_node_init(struct ath_softc *sc, struct ath_node *an);
+ void ath_tx_node_cleanup(struct ath_softc *sc, struct ath_node *an);
+-void ath_txq_schedule(struct ath_softc *sc, struct ath_txq *txq);
++bool ath_txq_schedule(struct ath_softc *sc, struct ath_txq *txq);
+ void ath_txq_schedule_all(struct ath_softc *sc);
+ int ath_tx_init(struct ath_softc *sc, int nbufs);
+ int ath_txq_update(struct ath_softc *sc, int qnum,
+@@ -684,6 +702,8 @@ void ath9k_calculate_iter_data(struct at
  void ath9k_calculate_summary_state(struct ath_softc *sc,
  				   struct ath_chanctx *ctx);
  void ath9k_set_txpower(struct ath_softc *sc, struct ieee80211_vif *vif);
@@ -183,22 +193,13 @@
  
  	sc->sc_ah = ah;
  	sc->dfs_detector = dfs_pattern_detector_init(common, NL80211_DFS_UNSET);
-@@ -735,11 +742,26 @@ static int ath9k_init_softc(u16 devid, s
- 	spin_lock_init(&sc->sc_serial_rw);
- 	spin_lock_init(&sc->sc_pm_lock);
- 	spin_lock_init(&sc->chan_lock);
-+	spin_lock_init(&sc->tx.tid_queue_lock);
- 	mutex_init(&sc->mutex);
- 	tasklet_init(&sc->intr_tq, ath9k_tasklet, (unsigned long)sc);
- 	tasklet_init(&sc->bcon_tasklet, ath9k_beacon_tasklet,
- 		     (unsigned long)sc);
+@@ -730,16 +737,33 @@ static int ath9k_init_softc(u16 devid, s
+ 	    (pCap->hw_caps & ATH9K_HW_CAP_BT_ANT_DIV))
+ 		common->bt_ant_diversity = 1;
  
-+	INIT_LIST_HEAD(&sc->tx.tid_queue);
 +	for (i = 0; i < EMPOWER_NUM_SLICE; i++) {
 +		sc->tx.slices[i].slice = i;
 +		spin_lock_init(&sc->tx.slices[i].slice_cfg_lock);
-+		INIT_LIST_HEAD(&sc->tx.slices[i].list);
-+		__skb_queue_head_init(&sc->tx.slices[i].queue);
 +		sc->tx.slices[i].slice_config.tqi_subtype = i;
 +		sc->tx.slices[i].slice_config.tqi_aifs = ATH9K_TXQ_USEDEFAULT;
 +		sc->tx.slices[i].slice_config.tqi_cwmin = ATH9K_TXQ_USEDEFAULT;
@@ -207,10 +208,26 @@
 +		sc->tx.slices[i].slice_config.tqi_burstTime = 0;
 +	}
 +
++	sc->tx.handled_slices = 0;
++	sc->tx.inactive_queues = ((u16)1 << ATH_NUM_DATA_TX_QUEUES) - 1;
++
+ 	spin_lock_init(&common->cc_lock);
+ 	spin_lock_init(&sc->intr_lock);
+ 	spin_lock_init(&sc->sc_serial_rw);
+ 	spin_lock_init(&sc->sc_pm_lock);
+ 	spin_lock_init(&sc->chan_lock);
++	spin_lock_init(&sc->tx.queue_lock);
++	__skb_queue_head_init(&sc->tx.queue);
+ 	mutex_init(&sc->mutex);
+ 	tasklet_init(&sc->intr_tq, ath9k_tasklet, (unsigned long)sc);
+ 	tasklet_init(&sc->bcon_tasklet, ath9k_beacon_tasklet,
+ 		     (unsigned long)sc);
+ 
++
  	timer_setup(&sc->sleep_timer, ath_ps_full_sleep, 0);
  	INIT_WORK(&sc->hw_reset_work, ath_reset_work);
  	INIT_WORK(&sc->paprd_work, ath_paprd_calibrate);
-@@ -938,16 +960,16 @@ static void ath9k_set_hw_capab(struct at
+@@ -938,16 +962,16 @@ static void ath9k_set_hw_capab(struct at
  	ieee80211_hw_set(hw, SUPPORT_FAST_XMIT);
  	ieee80211_hw_set(hw, SUPPORTS_CLONED_SKBS);
  
@@ -309,33 +326,100 @@
  		if (!list_empty(&acq->acq_new) || !list_empty(&acq->acq_old))
  			pending = true;
  	}
-@@ -764,6 +764,25 @@ static void ath9k_tx(struct ieee80211_hw
+@@ -379,6 +379,8 @@ void ath9k_tasklet(unsigned long data)
+ 	unsigned long flags;
+ 	u32 status;
+ 	u32 rxmask;
++	int i;
++	bool empty, ret;
+ 
+ 	spin_lock_irqsave(&sc->intr_lock, flags);
+ 	status = sc->intrstatus;
+@@ -450,20 +452,40 @@ void ath9k_tasklet(unsigned long data)
+ 		ath_rx_tasklet(sc, 0, false);
+ 	}
+ 
+-	if (status & ATH9K_INT_TX) {
+-		if (ah->caps.hw_caps & ATH9K_HW_CAP_EDMA) {
+-			/*
+-			 * For EDMA chips, TX completion is enabled for the
+-			 * beacon queue, so if a beacon has been transmitted
+-			 * successfully after a GTT interrupt, the GTT counter
+-			 * gets reset to zero here.
+-			 */
+-			sc->gtt_cnt = 0;
+-
+-			ath_tx_edma_tasklet(sc);
+-		} else {
+-			ath_tx_tasklet(sc);
++	// Losing the lock here is fine because we are serialized and other threads only add to the queue
++	spin_lock_bh(&sc->tx.queue_lock);
++	empty = skb_queue_empty_lockless(&sc->tx.queue);
++	spin_unlock_bh(&sc->tx.queue_lock);
++
++
++	// If we have data in the queue
++	if (!empty) {
++		ret = true;
++		// Keep scheduling until we arrive at a point where none of the HW queues can consume
++		while (ret) {
++			ret = false;
++			for (i = 0; i < ATH_NUM_DATA_TX_QUEUES; i++) {
++				ath_txq_lock(sc, &sc->tx.txq[i]);
++				ret |= ath_txq_schedule(sc, &sc->tx.txq[i]);
++				ath_txq_unlock(sc, &sc->tx.txq[i]);
++			}
+ 		}
++	}
++
++	if (status & ATH9K_INT_TX) {
++		// if (ah->caps.hw_caps & ATH9K_HW_CAP_EDMA) {
++		// 	/*
++		// 	 * For EDMA chips, TX completion is enabled for the
++		// 	 * beacon queue, so if a beacon has been transmitted
++		// 	 * successfully after a GTT interrupt, the GTT counter
++		// 	 * gets reset to zero here.
++		// 	 */
++		// 	sc->gtt_cnt = 0;
++
++		// 	ath_tx_edma_tasklet(sc);
++		// } else {
++		// 	ath_tx_tasklet(sc);
++		// }
+ 
+ 		wake_up(&sc->tx_wait);
+ 	}
+@@ -763,6 +785,29 @@ static void ath9k_tx(struct ieee80211_hw
+ 	struct ath_tx_control txctl;
  	struct ieee80211_hdr *hdr = (struct ieee80211_hdr *) skb->data;
  	unsigned long flags;
- 
-+	if (skb->priority >= EMPOWER_NUM_SLICE) {
++	int slice, hw_q;
++	slice = skb->priority;
++	
++	if (slice >= EMPOWER_NUM_SLICE) {
 +		printk(KERN_ERR "FAIL: Trying to send an SKB with priority of [%u] which exceeds expectations!\n", skb->priority);
 +		goto exit;
 +	}
 +
-+	// TODO: Recognize beacons?
-+	// This takes a lock and is thread-safe
-+	__skb_queue_tail(&sc->tx.slices[skb->priority].queue, skb);
-+
-+	spin_lock_irqsave(&sc->tx.tid_queue_lock, flags);
-+	if (list_empty(&sc->tx.slices[skb->priority].list)) {
-+		list_add_tail(&sc->tx.slices[skb->priority].list, &sc->tx.tid_queue);
++	// Put 
++	spin_lock_bh(&sc->tx.queue_lock);
++	if (skb_queue_len_lockless(&sc->tx.queue) > 255) {
++		printk(KERN_ERR "CONGESTED: Length of queue exceeded 255! Dropping packet...\n", skb->priority);
++		spin_unlock_bh(&sc->tx.queue_lock);
++		goto exit;
 +	}
-+	spin_unlock_irqrestore(&sc->tx.tid_queue_lock, flags);
++	__skb_queue_tail(&sc->tx.queue, skb);
 +
-+	printk(KERN_ERR "ATH MON TX: Pushed packet onto queue (slice) [%u]\n", skb->priority);
-+	ath_txq_schedule_all(sc);
++	spin_unlock_bh(&sc->tx.queue_lock);
++
++	tasklet_schedule(&sc->intr_tq);
++
++	// printk(KERN_ERR "ATH MON TX: Pushed packet onto queue (slice) [%u]\n", skb->priority);
 +	return;
-+
+ 
  	if (sc->ps_enabled) {
  		/*
- 		 * mac80211 does not set PM field for normal data frames, so we
-@@ -815,7 +834,7 @@ static void ath9k_tx(struct ieee80211_hw
+@@ -815,7 +860,7 @@ static void ath9k_tx(struct ieee80211_hw
  	}
  
  	memset(&txctl, 0, sizeof(struct ath_tx_control));
@@ -344,7 +428,7 @@
  	txctl.sta = control->sta;
  
  	ath_dbg(common, XMIT, "transmitting packet, skb: %p\n", skb);
-@@ -1246,11 +1265,11 @@ static void ath9k_assign_hw_queues(struc
+@@ -1246,11 +1291,11 @@ static void ath9k_assign_hw_queues(struc
  		return;
  
  	for (i = 0; i < IEEE80211_NUM_ACS; i++)
@@ -358,25 +442,26 @@
  	else
  		vif->cab_queue = IEEE80211_INVAL_HW_QUEUE;
  }
-@@ -1646,31 +1665,59 @@ static int ath9k_conf_tx(struct ieee8021
+@@ -1646,37 +1691,57 @@ static int ath9k_conf_tx(struct ieee8021
  {
  	struct ath_softc *sc = hw->priv;
  	struct ath_common *common = ath9k_hw_common(sc->sc_ah);
 -	struct ath_txq *txq;
 -	struct ath9k_tx_queue_info qi;
 -	int ret = 0;
-+	int ret, i = 0;
++	int i = 0;
  
 -	if (queue >= IEEE80211_NUM_ACS)
 -		return 0;
++	ath9k_ps_wakeup(sc);
+ 
+-	txq = sc->tx.txq_map[queue];
 +	printk(KERN_ERR "Saving slice config [%d], aifs: %d, cw_min: %d, cw_max: %d, txop: %d\n",
 +		queue, params->aifs, params->cw_min,
 +		params->cw_max, params->txop);
  
--	txq = sc->tx.txq_map[queue];
-+
-+	mutex_lock(&sc->mutex);
-+
+-	ath9k_ps_wakeup(sc);
+-	mutex_lock(&sc->mutex);
 +	spin_lock_bh(&sc->tx.slices[queue].slice_cfg_lock);
 +	sc->tx.slices[queue].slice_config.tqi_burstTime = params->txop * 32;
 +	sc->tx.slices[queue].slice_config.tqi_cwmin = params->cw_min;
@@ -391,49 +476,52 @@
 +		}
 +		ath_txq_unlock(sc, &sc->tx.txq[i]);
 +	}
-+
-+	mutex_unlock(&sc->mutex);
-+
+ 
+-	memset(&qi, 0, sizeof(struct ath9k_tx_queue_info));
+ 
+-	qi.tqi_aifs = params->aifs;
+-	qi.tqi_cwmin = params->cw_min;
+-	qi.tqi_cwmax = params->cw_max;
+-	qi.tqi_burstTime = params->txop * 32;
++	ath9k_ps_restore(sc);
+ 
+-	ath_dbg(common, CONFIG,
+-		"Configure tx [queue/halq] [%d/%d], aifs: %d, cw_min: %d, cw_max: %d, txop: %d\n",
+-		queue, txq->axq_qnum, params->aifs, params->cw_min,
+-		params->cw_max, params->txop);
 +	return 0;
 +}
-+
+ 
+-	ath_update_max_aggr_framelen(sc, queue, qi.tqi_burstTime);
++// Takes a txq lock
 +int ath9k_configure_queue_for_slice(struct ath_softc *sc, u16 slice, struct ath_txq *txq)
 +{
 +	struct ath_common *common = ath9k_hw_common(sc->sc_ah);
 +	struct ath9k_tx_queue_info *params = &sc->tx.slices[slice].slice_config;
 +	struct ath9k_tx_queue_info qi;
 +	int ret = 0;
- 
- 	ath9k_ps_wakeup(sc);
- 	mutex_lock(&sc->mutex);
- 
- 	memset(&qi, 0, sizeof(struct ath9k_tx_queue_info));
- 
--	qi.tqi_aifs = params->aifs;
--	qi.tqi_cwmin = params->cw_min;
--	qi.tqi_cwmax = params->cw_max;
--	qi.tqi_burstTime = params->txop * 32;
--
--	ath_dbg(common, CONFIG,
--		"Configure tx [queue/halq] [%d/%d], aifs: %d, cw_min: %d, cw_max: %d, txop: %d\n",
--		queue, txq->axq_qnum, params->aifs, params->cw_min,
--		params->cw_max, params->txop);
++
++	memset(&qi, 0, sizeof(struct ath9k_tx_queue_info));
++
 +	spin_lock_bh(&sc->tx.slices[slice].slice_cfg_lock);	
 +	qi.tqi_aifs = params->tqi_aifs;
 +	qi.tqi_cwmin = params->tqi_cwmin;
 +	qi.tqi_cwmax = params->tqi_cwmax;
-+	qi.tqi_burstTime = params->tqi_burstTime;
 +	spin_unlock_bh(&sc->tx.slices[slice].slice_cfg_lock);	
 +
 +	printk(KERN_ERR "Configure tx [slice/queue] [%d/%d], aifs: %d, cw_min: %d, cw_max: %d, txop*32: %d\n",
 +		slice, txq->axq_qnum, params->tqi_aifs, params->tqi_cwmin,
 +		params->tqi_cwmax, params->tqi_burstTime);
- 
--	ath_update_max_aggr_framelen(sc, queue, qi.tqi_burstTime);
-+	ath_update_max_aggr_framelen(sc, slice, qi.tqi_burstTime);
  	ret = ath_txq_update(sc, txq->axq_qnum, &qi);
  	if (ret)
- 		ath_err(common, "TXQ Update failed\n");
+-		ath_err(common, "TXQ Update failed\n");
+-
+-	mutex_unlock(&sc->mutex);
+-	ath9k_ps_restore(sc);
++		printk(KERN_ERR "TXQ Update failed!\n");
+ 
+ 	return ret;
+ }
 --- a/drivers/net/wireless/ath/ath9k/xmit.c
 +++ b/drivers/net/wireless/ath/ath9k/xmit.c
 @@ -119,18 +119,13 @@ void __ath_tx_queue_tid(struct ath_softc
@@ -559,51 +647,58 @@
  	qi.tqi_aifs = ATH9K_TXQ_USEDEFAULT;
  	qi.tqi_cwmin = ATH9K_TXQ_USEDEFAULT;
  	qi.tqi_cwmax = ATH9K_TXQ_USEDEFAULT;
-@@ -1975,75 +1973,71 @@ void ath_tx_cleanupq(struct ath_softc *s
+@@ -1975,89 +1973,121 @@ void ath_tx_cleanupq(struct ath_softc *s
  	sc->tx.txqsetup &= ~(1<<txq->axq_qnum);
  }
  
 -/* For each acq entry, for each tid, try to schedule packets
 - * for transmit until ampdu_depth has reached min Q depth.
 - */
- void ath_txq_schedule(struct ath_softc *sc, struct ath_txq *txq)
+-void ath_txq_schedule(struct ath_softc *sc, struct ath_txq *txq)
++bool ath_txq_schedule(struct ath_softc *sc, struct ath_txq *txq)
  {
  	struct ath_common *common = ath9k_hw_common(sc->sc_ah);
 -	struct ath_atx_tid *tid;
-+	struct ath_empower_slice *slice;
- 	struct list_head *tid_list;
+-	struct list_head *tid_list;
 -	struct ath_acq *acq;
 -	bool active = AIRTIME_ACTIVE(sc->airtime_flags);
--
--	if (txq->mac80211_qnum < 0)
--		return;
++	struct ath_empower_slice *slice;
 +	int ret;
 +	bool has_frames;
 +	struct sk_buff *skb;
-+	unsigned long flags;
++	bool sent_something = false;
+ 
+-	if (txq->mac80211_qnum < 0)
+-		return;
++	printk(KERN_ERR "Scheduling for TXQ [%u], currently serving slice [%u]\n", txq->axq_qnum, txq->current_slice);
++	// Losing the lock here is fine because other threads can only add not consume
  
 -	if (test_bit(ATH_OP_HW_RESET, &common->op_flags))
 -		return;
-+	// printk(KERN_ERR "Scheduling for TXQ [%u], currently serving slice [%u]\n", txq->axq_qnum, txq->current_slice);
++	spin_lock_bh(&sc->tx.queue_lock);
++	if (skb_queue_empty_lockless(&sc->tx.queue)) {
++		spin_unlock_bh(&sc->tx.queue_lock);
++		goto out;
++	}
  
 -	spin_lock_bh(&sc->chan_lock);
 -	rcu_read_lock();
 -	acq = &sc->cur_chan->acq[txq->mac80211_qnum];
-+	spin_lock_irqsave(&sc->tx.tid_queue_lock, flags);
++	skb = __skb_peek(&sc->tx.queue);
++	spin_unlock_bh(&sc->tx.queue_lock);
  
 -	if (sc->cur_chan->stopped)
--		goto out;
-+search:
-+	tid_list = &sc->tx.tid_queue;
- 
++	slice = &sc->tx.slices[skb->priority];
++	// If the slice is flagged as handled OR we are not a wildcard and someone else is, let them handle it
++	if (slice->slice != txq->current_slice && (((sc->tx.handled_slices & BIT(slice->slice)) != 0) || ((txq->current_slice != -1) && sc->tx.inactive_queues != 0))) {
+ 		goto out;
+-
 -begin:
 -	tid_list = &acq->acq_new;
- 	if (list_empty(tid_list)) {
+-	if (list_empty(tid_list)) {
 -		tid_list = &acq->acq_old;
 -		if (list_empty(tid_list))
 -			goto out;
-+		printk(KERN_ERR "No TID in queue to be scheduled!\n");
-+		goto out;
  	}
 -	tid = list_first_entry(tid_list, struct ath_atx_tid, list);
  
@@ -614,8 +709,16 @@
 -		spin_unlock_bh(&acq->lock);
 -		goto begin;
 -	}
-+	slice = list_first_entry(tid_list, struct ath_empower_slice, list);
-+	printk(KERN_ERR "Trying to schedule [%u] for TX...\n", slice->slice);
++	// We are holding the txq lock here, protected
++	has_frames = txq->axq_depth > 0;
++	if (txq->current_slice != slice->slice && !has_frames) {
++
++		printk(KERN_ERR  "Queue is currently empty and has different slice, reconfiguring...\n");
++		ret = ath9k_configure_queue_for_slice(sc, slice->slice, txq);
++		if (ret) {
++			printk(KERN_ERR "Error reconfiguring slice!\n");
++ 			goto out;
++		}
  
 -	if (!ath_tid_has_buffered(tid)) {
 -		spin_lock_bh(&acq->lock);
@@ -623,28 +726,20 @@
 -			list_move_tail(&tid->list, &acq->acq_old);
 -		else {
 -			list_del_init(&tid->list);
--		}
++		if (txq->current_slice != -1) {
++			sc->tx.handled_slices &= ~(BIT(txq->current_slice)); // Erase the slice as handled
++		} else {
++			sc->tx.inactive_queues &= ~(BIT(txq->axq_qnum)); // Set the current hw queue as active
+ 		}
 -		spin_unlock_bh(&acq->lock);
 -		goto begin;
-+	// If the given TID has nothing to be sent
-+	if (skb_queue_empty(&slice->queue)) {
-+		printk(KERN_ERR "[%u] does not have anything to send!\n", slice->slice);
-+		list_del_init(&slice->list);
-+		goto search;
-+	}
-+
-+	// Can't schedule anything
-+
-+	has_frames = txq->axq_depth > 0;
-+	if (txq->current_slice != slice->slice && !has_frames) {
-+		printk(KERN_ERR  "Queue is currently empty and has different slice, reconfiguring...\n");
-+		ret = ath9k_configure_queue_for_slice(sc, slice->slice, txq);
-+		if (ret) {
-+			printk(KERN_ERR "Error reconfiguring slice!\n");
-+ 			goto out;
-+		}
 +
 +		txq->current_slice = slice->slice;
++
++		sc->tx.handled_slices |= (BIT(txq->current_slice));
++
++		printk(KERN_ERR "Changed queue params, handled_slices: [%u], inactive_queues: [%u]\n", sc->tx.handled_slices, sc->tx.inactive_queues);
++
 +	} else if (txq->current_slice != slice->slice && has_frames) {
 +		// We can't TX and we also can't change the queue props
 +		printk(KERN_ERR "Queue is busy AND misconfigured, skipping\n");
@@ -664,35 +759,76 @@
 -			spin_lock_bh(&acq->lock);
 -			list_move_tail(&tid->list, &acq->acq_old);
 -			spin_unlock_bh(&acq->lock);
-+	while ((skb = __skb_dequeue(&slice->queue))) {
++	spin_lock_bh(&sc->tx.queue_lock);
++	while (skb->priority == slice->slice) {
++		skb = __skb_dequeue(&sc->tx.queue);
++		sent_something = true;
 +		if(ath_tx_start(sc->hw, skb, &txctl)) {
-+			printk(KERN_ERR "Failed to send!\n");
-+			list_move_tail(&slice->list, tid_list);
++			printk(KERN_ERR "Failed to send! Discarding...\n");
++			ieee80211_free_txskb(sc->hw, skb);
++			break;
++		}
++		printk(KERN_ERR "Sent packet!\n");
++
++		if (skb_queue_empty_lockless(&sc->tx.queue)) {
++			break;
  		}
 -		goto begin;
-+		printk(KERN_ERR "Sent packet!\n");
++
++		skb = __skb_peek(&sc->tx.queue);
  	}
++	spin_unlock_bh(&sc->tx.queue_lock);
  
  out:
 -	rcu_read_unlock();
 -	spin_unlock_bh(&sc->chan_lock);
-+	spin_unlock_irqrestore(&sc->tx.tid_queue_lock, flags);
-+	return;
++	return sent_something;
  }
  
  void ath_txq_schedule_all(struct ath_softc *sc)
-@@ -2051,8 +2045,8 @@ void ath_txq_schedule_all(struct ath_sof
+ {
  	struct ath_txq *txq;
  	int i;
- 
+-
 -	for (i = 0; i < IEEE80211_NUM_ACS; i++) {
 -		txq = sc->tx.txq_map[i];
-+	for (i = 0; i < ATH_NUM_DATA_TX_QUEUES; i++) {
-+		txq = &sc->tx.txq[i];
+-
+-		spin_lock_bh(&txq->axq_lock);
+-		ath_txq_schedule(sc, txq);
+-		spin_unlock_bh(&txq->axq_lock);
+-	}
++	bool ret = false;
++	printk(KERN_ERR "Sched all ignored!");
++	return;
++
++	// for (i = 0; i < ATH_NUM_DATA_TX_QUEUES; i++) {
++	// 	txq = &sc->tx.txq[i];
++
++	// 	if (txq->current_slice == -1) {
++	// 		ath_txq_schedule_emp(sc, txq, true);
++	// 		ret = true;
++	// 	}
++
++	// 	// If we scheduled something, we are done!
++	// 	if (ret) {
++	// 		return;
++	// 	}
++	// }
++
++
++	// for (i = 0; i < ATH_NUM_DATA_TX_QUEUES; i++) {
++	// 	txq = &sc->tx.txq[i];
++	// 	// Try again, but allow changing queue props regardless of anything
++	// 	ret = ath_txq_schedule_emp(sc, txq, true);
++
++	// 	if (ret) {
++	// 		return;
++	// 	}
++	// }
+ }
  
- 		spin_lock_bh(&txq->axq_lock);
- 		ath_txq_schedule(sc, txq);
-@@ -2399,11 +2393,10 @@ int ath_tx_start(struct ieee80211_hw *hw
+ /***********/
+@@ -2399,11 +2429,10 @@ int ath_tx_start(struct ieee80211_hw *hw
  		tid = ath_get_skb_tid(sc, an, skb);
  	}
  
@@ -707,7 +843,7 @@
  
  	bf = ath_tx_setup_buffer(sc, txq, tid, skb);
  	if (!bf) {
-@@ -2424,7 +2417,6 @@ int ath_tx_start(struct ieee80211_hw *hw
+@@ -2424,7 +2453,6 @@ int ath_tx_start(struct ieee80211_hw *hw
  	ath_tx_send_normal(sc, txq, tid, skb);
  
  out:
@@ -715,7 +851,15 @@
  
  	return 0;
  }
-@@ -2887,10 +2879,10 @@ void ath_tx_node_init(struct ath_softc *
+@@ -2661,7 +2689,6 @@ static void ath_tx_processq(struct ath_s
+ 	ath_dbg(common, QUEUE, "tx queue %d (%x), link %p\n",
+ 		txq->axq_qnum, ath9k_hw_gettxbuf(sc->sc_ah, txq->axq_qnum),
+ 		txq->axq_link);
+-
+ 	ath_txq_lock(sc, txq);
+ 	for (;;) {
+ 		if (test_bit(ATH_OP_HW_RESET, &common->op_flags))
+@@ -2887,10 +2914,10 @@ void ath_tx_node_init(struct ath_softc *
  	struct ath_atx_tid *tid;
  	int tidno, acno;
  
@@ -728,7 +872,7 @@
  		tid = ath_node_to_tid(an, tidno);
  		tid->an        = an;
  		tid->tidno     = tidno;
-@@ -2903,7 +2895,7 @@ void ath_tx_node_init(struct ath_softc *
+@@ -2903,7 +2930,7 @@ void ath_tx_node_init(struct ath_softc *
  		__skb_queue_head_init(&tid->retry_q);
  		INIT_LIST_HEAD(&tid->list);
  		acno = TID_TO_WME_AC(tidno);
@@ -737,7 +881,7 @@
  
  		if (!an->sta)
  			break; /* just one multicast ath_atx_tid */
-@@ -2915,10 +2907,11 @@ void ath_tx_node_cleanup(struct ath_soft
+@@ -2915,10 +2942,11 @@ void ath_tx_node_cleanup(struct ath_soft
  	struct ath_atx_tid *tid;
  	struct ath_txq *txq;
  	int tidno;
