@@ -455,16 +455,42 @@
  	if (!ath_complete_reset(sc, false))
  		ah->reset_power_on = false;
  
-@@ -763,6 +789,29 @@ static void ath9k_tx(struct ieee80211_hw
+@@ -761,8 +787,55 @@ static void ath9k_tx(struct ieee80211_hw
+ 	struct ath_softc *sc = hw->priv;
+ 	struct ath_common *common = ath9k_hw_common(sc->sc_ah);
  	struct ath_tx_control txctl;
++	struct ath_txq *txq;
  	struct ieee80211_hdr *hdr = (struct ieee80211_hdr *) skb->data;
  	unsigned long flags;
-+	int slice, hw_q;
++	int slice, hw_q, i;
++	bool sent = false;
 +	slice = skb->priority;
 +	
 +	if (slice >= EMPOWER_NUM_SLICE) {
 +		printk(KERN_ERR "FAIL: Trying to send an SKB with priority of [%u] which exceeds expectations!\n", skb->priority);
 +		goto exit;
++	}
++
++	for (i = 0; i < ATH_NUM_DATA_TX_QUEUES; i++) {
++		txq = &sc->tx.txq[i];
++		ath_txq_lock(sc, txq);
++		if (txq->current_slice == slice) {
++			struct ath_tx_control txctl = {
++				.txq = txq
++			};
++			
++			if(ath_tx_start(sc->hw, skb, &txctl)) {
++				printk(KERN_ERR "Failed to send! Discarding...\n");
++				ieee80211_free_txskb(sc->hw, skb);
++				ath_txq_unlock(sc, txq);
++				return;
++			} else {
++				printk(KERN_ERR "Direct send! Skipping tasklet.\n");
++				ath_txq_unlock(sc, txq);
++				return;
++			}
++		}
++		ath_txq_unlock(sc, txq);
 +	}
 +
 +	// Put 
@@ -485,7 +511,7 @@
  
  	if (sc->ps_enabled) {
  		/*
-@@ -815,7 +864,7 @@ static void ath9k_tx(struct ieee80211_hw
+@@ -815,7 +888,7 @@ static void ath9k_tx(struct ieee80211_hw
  	}
  
  	memset(&txctl, 0, sizeof(struct ath_tx_control));
@@ -494,7 +520,7 @@
  	txctl.sta = control->sta;
  
  	ath_dbg(common, XMIT, "transmitting packet, skb: %p\n", skb);
-@@ -1246,11 +1295,11 @@ static void ath9k_assign_hw_queues(struc
+@@ -1246,11 +1319,11 @@ static void ath9k_assign_hw_queues(struc
  		return;
  
  	for (i = 0; i < IEEE80211_NUM_ACS; i++)
@@ -508,7 +534,7 @@
  	else
  		vif->cab_queue = IEEE80211_INVAL_HW_QUEUE;
  }
-@@ -1646,37 +1695,57 @@ static int ath9k_conf_tx(struct ieee8021
+@@ -1646,37 +1719,57 @@ static int ath9k_conf_tx(struct ieee8021
  {
  	struct ath_softc *sc = hw->priv;
  	struct ath_common *common = ath9k_hw_common(sc->sc_ah);
@@ -550,14 +576,15 @@
 -	qi.tqi_cwmax = params->cw_max;
 -	qi.tqi_burstTime = params->txop * 32;
 +	ath9k_ps_restore(sc);
-+
-+	return 0;
-+}
  
 -	ath_dbg(common, CONFIG,
 -		"Configure tx [queue/halq] [%d/%d], aifs: %d, cw_min: %d, cw_max: %d, txop: %d\n",
 -		queue, txq->axq_qnum, params->aifs, params->cw_min,
 -		params->cw_max, params->txop);
++	return 0;
++}
+ 
+-	ath_update_max_aggr_framelen(sc, queue, qi.tqi_burstTime);
 +// Takes a txq lock
 +int ath9k_configure_queue_for_slice(struct ath_softc *sc, u16 slice, struct ath_txq *txq)
 +{
@@ -567,8 +594,7 @@
 +	int ret = 0;
 +
 +	memset(&qi, 0, sizeof(struct ath9k_tx_queue_info));
- 
--	ath_update_max_aggr_framelen(sc, queue, qi.tqi_burstTime);
++
 +	spin_lock_bh(&sc->tx.slices[slice].slice_cfg_lock);	
 +	qi.tqi_aifs = params->tqi_aifs;
 +	qi.tqi_cwmin = params->tqi_cwmin;
@@ -588,7 +614,7 @@
  
  	return ret;
  }
-@@ -2136,7 +2205,8 @@ void __ath9k_flush(struct ieee80211_hw *
+@@ -2136,7 +2229,8 @@ void __ath9k_flush(struct ieee80211_hw *
  		spin_lock_bh(&sc->sc_pcu_lock);
  		drain_txq = ath_drain_all_txq(sc);
  		spin_unlock_bh(&sc->sc_pcu_lock);
