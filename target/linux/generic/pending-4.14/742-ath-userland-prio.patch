@@ -34,3 +34,57 @@
  	if (has_vnet_hdr) {
  		err = virtio_net_hdr_to_skb(skb, &vnet_hdr, vio_le());
  		if (err)
+--- a/net/wireless/nl80211.c
++++ b/net/wireless/nl80211.c
+@@ -2112,9 +2112,7 @@ static int parse_txq_params(struct nlatt
+ 	txq_params->cwmax = nla_get_u16(tb[NL80211_TXQ_ATTR_CWMAX]);
+ 	txq_params->aifs = nla_get_u8(tb[NL80211_TXQ_ATTR_AIFS]);
+ 
+-	if (ac >= NL80211_NUM_ACS)
+-		return -EINVAL;
+-	txq_params->ac = array_index_nospec(ac, NL80211_NUM_ACS);
++	txq_params->ac = ac;
+ 	return 0;
+ }
+ 
+@@ -2368,10 +2366,6 @@ static int nl80211_set_wiphy(struct sk_b
+ 		if (!netdev)
+ 			return -EINVAL;
+ 
+-		if (netdev->ieee80211_ptr->iftype != NL80211_IFTYPE_AP &&
+-		    netdev->ieee80211_ptr->iftype != NL80211_IFTYPE_P2P_GO)
+-			return -EINVAL;
+-
+ 		if (!netif_running(netdev))
+ 			return -ENETDOWN;
+ 
+--- a/net/mac80211/cfg.c
++++ b/net/mac80211/cfg.c
+@@ -2100,9 +2100,6 @@ static int ieee80211_set_txq_params(stru
+ 	if (!local->ops->conf_tx)
+ 		return -EOPNOTSUPP;
+ 
+-	if (local->hw.queues < IEEE80211_NUM_ACS)
+-		return -EOPNOTSUPP;
+-
+ 	memset(&p, 0, sizeof(p));
+ 	p.aifs = params->aifs;
+ 	p.cw_max = params->cwmax;
+@@ -2115,7 +2112,7 @@ static int ieee80211_set_txq_params(stru
+ 	 */
+ 	p.uapsd = false;
+ 
+-	sdata->tx_conf[params->ac] = p;
++	// sdata->tx_conf[params->ac] = p;
+ 	if (drv_conf_tx(local, sdata, params->ac, &p)) {
+ 		wiphy_debug(local->hw.wiphy,
+ 			    "failed to set TX queue parameters for AC %d\n",
+@@ -2123,7 +2120,7 @@ static int ieee80211_set_txq_params(stru
+ 		return -EINVAL;
+ 	}
+ 
+-	ieee80211_bss_info_change_notify(sdata, BSS_CHANGED_QOS);
++	// ieee80211_bss_info_change_notify(sdata, BSS_CHANGED_QOS);
+ 
+ 	return 0;
+ }

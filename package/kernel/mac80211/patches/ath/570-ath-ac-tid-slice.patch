@@ -162,9 +162,19 @@
  struct ath_skbrx_stats {
 --- a/drivers/net/wireless/ath/ath9k/init.c
 +++ b/drivers/net/wireless/ath/ath9k/init.c
-@@ -413,10 +413,18 @@ static int ath9k_init_queues(struct ath_
+@@ -407,16 +407,24 @@ static int ath9k_init_queues(struct ath_
+ {
+ 	int i = 0;
  
- 	sc->tx.uapsdq = ath_txq_setup(sc, ATH9K_TX_QUEUE_UAPSD, 0);
+-	sc->beacon.beaconq = ath9k_hw_beaconq_setup(sc->sc_ah);
+-	sc->beacon.cabq = ath_txq_setup(sc, ATH9K_TX_QUEUE_CAB, 0);
+-	ath_cabq_update(sc);
++	// sc->beacon.beaconq = ath9k_hw_beaconq_setup(sc->sc_ah);
++	// sc->beacon.cabq = ath_txq_setup(sc, ATH9K_TX_QUEUE_CAB, 0);
++	// ath_cabq_update(sc);
+ 
+-	sc->tx.uapsdq = ath_txq_setup(sc, ATH9K_TX_QUEUE_UAPSD, 0);
++	// sc->tx.uapsdq = ath_txq_setup(sc, ATH9K_TX_QUEUE_UAPSD, 0);
  
 +	for (i = 0; i < ATH_NUM_DATA_TX_QUEUES; i++) {
 +		// We don't use txq_map anymore, just force the qnum to 0
@@ -265,6 +275,22 @@
  
  		ath_txq_lock(sc, txq);
  		if (txq->axq_depth) {
+@@ -48,6 +48,7 @@ static bool ath_tx_complete_check(struct
+ reset:
+ 	ath_dbg(ath9k_hw_common(sc->sc_ah), RESET,
+ 		"tx hung, resetting the chip\n");
++	printk(KERN_ERR "TX hung!");
+ 	ath9k_queue_reset(sc, RESET_TYPE_TX_HANG);
+ 	return false;
+ 
+@@ -83,6 +84,7 @@ bool ath_hw_check(struct ath_softc *sc)
+ 		ath_dbg(common, RESET,
+ 			"HW hang detected, schedule chip reset\n");
+ 		type = RESET_TYPE_MAC_HANG;
++		printk(KERN_ERR "HW Hang detected!");
+ 		ath9k_queue_reset(sc, type);
+ 	}
+ 
 --- a/drivers/net/wireless/ath/ath9k/mac.c
 +++ b/drivers/net/wireless/ath/ath9k/mac.c
 @@ -245,14 +245,14 @@ bool ath9k_hw_set_txq_props(struct ath_h
@@ -326,7 +352,15 @@
  		if (!list_empty(&acq->acq_new) || !list_empty(&acq->acq_old))
  			pending = true;
  	}
-@@ -379,6 +379,8 @@ void ath9k_tasklet(unsigned long data)
+@@ -267,6 +267,7 @@ static bool ath_complete_reset(struct at
+ 			ath9k_set_beacon(sc);
+ 		}
+ 	work:
++		printk(KERN_ERR "Complete reset\n");
+ 		ath_restart_work(sc);
+ 		ath_txq_schedule_all(sc);
+ 	}
+@@ -379,6 +380,8 @@ void ath9k_tasklet(unsigned long data)
  	unsigned long flags;
  	u32 status;
  	u32 rxmask;
@@ -335,61 +369,93 @@
  
  	spin_lock_irqsave(&sc->intr_lock, flags);
  	status = sc->intrstatus;
-@@ -450,20 +452,40 @@ void ath9k_tasklet(unsigned long data)
+@@ -390,6 +393,7 @@ void ath9k_tasklet(unsigned long data)
+ 
+ 	if (status & ATH9K_INT_FATAL) {
+ 		type = RESET_TYPE_FATAL_INT;
++		printk(KERN_ERR "Fatal error reported by chip in IRQ!\n");
+ 		ath9k_queue_reset(sc, type);
+ 		ath_dbg(common, RESET, "FATAL: Skipping interrupts\n");
+ 		goto out;
+@@ -404,6 +408,7 @@ void ath9k_tasklet(unsigned long data)
+ 
+ 		if (ar9003_hw_bb_watchdog_check(ah)) {
+ 			type = RESET_TYPE_BB_WATCHDOG;
++			printk(KERN_ERR "Watchdog detected hang\n");
+ 			ath9k_queue_reset(sc, type);
+ 
+ 			ath_dbg(common, RESET,
+@@ -416,6 +421,7 @@ void ath9k_tasklet(unsigned long data)
+ 		sc->gtt_cnt++;
+ 
+ 		if ((sc->gtt_cnt >= MAX_GTT_CNT) && !ath9k_hw_check_alive(ah)) {
++			printk(KERN_ERR "GTT Exceeded max!");
+ 			type = RESET_TYPE_TX_GTT;
+ 			ath9k_queue_reset(sc, type);
+ 			ath_dbg(common, RESET,
+@@ -450,6 +456,8 @@ void ath9k_tasklet(unsigned long data)
  		ath_rx_tasklet(sc, 0, false);
  	}
  
--	if (status & ATH9K_INT_TX) {
--		if (ah->caps.hw_caps & ATH9K_HW_CAP_EDMA) {
--			/*
--			 * For EDMA chips, TX completion is enabled for the
--			 * beacon queue, so if a beacon has been transmitted
--			 * successfully after a GTT interrupt, the GTT counter
--			 * gets reset to zero here.
--			 */
--			sc->gtt_cnt = 0;
--
++	// In here, we process a successful TX
++
+ 	if (status & ATH9K_INT_TX) {
+ 		if (ah->caps.hw_caps & ATH9K_HW_CAP_EDMA) {
+ 			/*
+@@ -459,8 +467,9 @@ void ath9k_tasklet(unsigned long data)
+ 			 * gets reset to zero here.
+ 			 */
+ 			sc->gtt_cnt = 0;
++			printk(KERN_ERR "edma tasklet would have executed!");
+ 
 -			ath_tx_edma_tasklet(sc);
--		} else {
--			ath_tx_tasklet(sc);
++			// ath_tx_edma_tasklet(sc);
+ 		} else {
+ 			ath_tx_tasklet(sc);
+ 		}
+@@ -468,6 +477,20 @@ void ath9k_tasklet(unsigned long data)
+ 		wake_up(&sc->tx_wait);
+ 	}
+ 
 +	// Losing the lock here is fine because we are serialized and other threads only add to the queue
 +	spin_lock_bh(&sc->tx.queue_lock);
 +	empty = skb_queue_empty_lockless(&sc->tx.queue);
 +	spin_unlock_bh(&sc->tx.queue_lock);
 +
-+
-+	// If we have data in the queue
 +	if (!empty) {
-+		ret = true;
-+		// Keep scheduling until we arrive at a point where none of the HW queues can consume
-+		while (ret) {
-+			ret = false;
-+			for (i = 0; i < ATH_NUM_DATA_TX_QUEUES; i++) {
-+				ath_txq_lock(sc, &sc->tx.txq[i]);
-+				ret |= ath_txq_schedule(sc, &sc->tx.txq[i]);
-+				ath_txq_unlock(sc, &sc->tx.txq[i]);
-+			}
- 		}
-+	}
++		for (i = 0; i < ATH_NUM_DATA_TX_QUEUES; i++) {
++			ath_txq_lock(sc, &sc->tx.txq[i]);
++			ath_txq_schedule(sc, &sc->tx.txq[i]);
++			ath_txq_unlock(sc, &sc->tx.txq[i]);
++		}
++	}	// If we have data in the queue
 +
-+	if (status & ATH9K_INT_TX) {
-+		// if (ah->caps.hw_caps & ATH9K_HW_CAP_EDMA) {
-+		// 	/*
-+		// 	 * For EDMA chips, TX completion is enabled for the
-+		// 	 * beacon queue, so if a beacon has been transmitted
-+		// 	 * successfully after a GTT interrupt, the GTT counter
-+		// 	 * gets reset to zero here.
-+		// 	 */
-+		// 	sc->gtt_cnt = 0;
 +
-+		// 	ath_tx_edma_tasklet(sc);
-+		// } else {
-+		// 	ath_tx_tasklet(sc);
-+		// }
+ 	if (status & ATH9K_INT_GENTIMER)
+ 		ath_gen_timer_isr(sc->sc_ah);
  
- 		wake_up(&sc->tx_wait);
- 	}
-@@ -763,6 +785,29 @@ static void ath9k_tx(struct ieee80211_hw
+@@ -561,8 +584,10 @@ irqreturn_t ath_isr(int irq, void *dev)
+ 	    (status & ATH9K_INT_BB_WATCHDOG))
+ 		goto chip_reset;
+ 
+-	if (status & ATH9K_INT_SWBA)
+-		tasklet_schedule(&sc->bcon_tasklet);
++	if (status & ATH9K_INT_SWBA) {
++		printk(KERN_ERR "BCON requested but ignored");
++// tasklet_schedule(&sc->bcon_tasklet);
++	}
+ 
+ 	if (status & ATH9K_INT_TXURN)
+ 		ath9k_hw_updatetxtriglevel(ah, true);
+@@ -720,6 +745,7 @@ static int ath9k_start(struct ieee80211_
+ 	clear_bit(ATH_OP_INVALID, &common->op_flags);
+ 	sc->sc_ah->is_monitoring = false;
+ 
++	printk(KERN_ERR "ATH9K START!!");
+ 	if (!ath_complete_reset(sc, false))
+ 		ah->reset_power_on = false;
+ 
+@@ -763,6 +789,29 @@ static void ath9k_tx(struct ieee80211_hw
  	struct ath_tx_control txctl;
  	struct ieee80211_hdr *hdr = (struct ieee80211_hdr *) skb->data;
  	unsigned long flags;
@@ -419,7 +485,7 @@
  
  	if (sc->ps_enabled) {
  		/*
-@@ -815,7 +860,7 @@ static void ath9k_tx(struct ieee80211_hw
+@@ -815,7 +864,7 @@ static void ath9k_tx(struct ieee80211_hw
  	}
  
  	memset(&txctl, 0, sizeof(struct ath_tx_control));
@@ -428,7 +494,7 @@
  	txctl.sta = control->sta;
  
  	ath_dbg(common, XMIT, "transmitting packet, skb: %p\n", skb);
-@@ -1246,11 +1291,11 @@ static void ath9k_assign_hw_queues(struc
+@@ -1246,11 +1295,11 @@ static void ath9k_assign_hw_queues(struc
  		return;
  
  	for (i = 0; i < IEEE80211_NUM_ACS; i++)
@@ -442,7 +508,7 @@
  	else
  		vif->cab_queue = IEEE80211_INVAL_HW_QUEUE;
  }
-@@ -1646,37 +1691,57 @@ static int ath9k_conf_tx(struct ieee8021
+@@ -1646,37 +1695,57 @@ static int ath9k_conf_tx(struct ieee8021
  {
  	struct ath_softc *sc = hw->priv;
  	struct ath_common *common = ath9k_hw_common(sc->sc_ah);
@@ -484,15 +550,14 @@
 -	qi.tqi_cwmax = params->cw_max;
 -	qi.tqi_burstTime = params->txop * 32;
 +	ath9k_ps_restore(sc);
++
++	return 0;
++}
  
 -	ath_dbg(common, CONFIG,
 -		"Configure tx [queue/halq] [%d/%d], aifs: %d, cw_min: %d, cw_max: %d, txop: %d\n",
 -		queue, txq->axq_qnum, params->aifs, params->cw_min,
 -		params->cw_max, params->txop);
-+	return 0;
-+}
- 
--	ath_update_max_aggr_framelen(sc, queue, qi.tqi_burstTime);
 +// Takes a txq lock
 +int ath9k_configure_queue_for_slice(struct ath_softc *sc, u16 slice, struct ath_txq *txq)
 +{
@@ -502,7 +567,8 @@
 +	int ret = 0;
 +
 +	memset(&qi, 0, sizeof(struct ath9k_tx_queue_info));
-+
+ 
+-	ath_update_max_aggr_framelen(sc, queue, qi.tqi_burstTime);
 +	spin_lock_bh(&sc->tx.slices[slice].slice_cfg_lock);	
 +	qi.tqi_aifs = params->tqi_aifs;
 +	qi.tqi_cwmin = params->tqi_cwmin;
@@ -522,6 +588,16 @@
  
  	return ret;
  }
+@@ -2136,7 +2205,8 @@ void __ath9k_flush(struct ieee80211_hw *
+ 		spin_lock_bh(&sc->sc_pcu_lock);
+ 		drain_txq = ath_drain_all_txq(sc);
+ 		spin_unlock_bh(&sc->sc_pcu_lock);
+-
++		
++		printk(KERN_ERR "Flushing queues!");
+ 		if (!drain_txq)
+ 			ath_reset(sc, NULL);
+ 
 --- a/drivers/net/wireless/ath/ath9k/xmit.c
 +++ b/drivers/net/wireless/ath/ath9k/xmit.c
 @@ -119,18 +119,13 @@ void __ath_tx_queue_tid(struct ath_softc
@@ -596,6 +672,17 @@
  
  		spin_lock_bh(&acq->lock);
  		an->airtime_deficit[q] -= airtime;
+@@ -780,8 +778,8 @@ static void ath_tx_process_buffer(struct
+ 	} else
+ 		ath_tx_complete_aggr(sc, txq, bf, bf_head, sta, tid, ts, txok);
+ 
+-	if (!flush)
+-		ath_txq_schedule(sc, txq);
++	// if (!flush)
++	// 	ath_txq_schedule(sc, txq);
+ }
+ 
+ static bool ath_lookup_legacy(struct ath_buf *bf)
 @@ -814,7 +812,7 @@ static u32 ath_lookup_rate(struct ath_so
  	struct ieee80211_tx_rate *rates;
  	u32 max_4ms_framelen, frmlen;
@@ -623,7 +710,17 @@
  		tid = ath_node_to_tid(an, tidno);
  		txq = tid->txq;
  
-@@ -1760,16 +1758,16 @@ struct ath_txq *ath_txq_setup(struct ath
+@@ -1702,6 +1700,9 @@ void ath9k_release_buffered_frames(struc
+ 	int sent = 0;
+ 	int i;
+ 
++	printk(KERN_ERR "Ignoring release buffered frames\n");
++	return;
++
+ 	INIT_LIST_HEAD(&bf_q);
+ 	for (i = 0; tids && nframes; i++, tids >>= 1) {
+ 		struct ath_atx_tid *tid;
+@@ -1760,16 +1761,16 @@ struct ath_txq *ath_txq_setup(struct ath
  {
  	struct ath_hw *ah = sc->sc_ah;
  	struct ath9k_tx_queue_info qi;
@@ -647,7 +744,7 @@
  	qi.tqi_aifs = ATH9K_TXQ_USEDEFAULT;
  	qi.tqi_cwmin = ATH9K_TXQ_USEDEFAULT;
  	qi.tqi_cwmax = ATH9K_TXQ_USEDEFAULT;
-@@ -1975,89 +1973,121 @@ void ath_tx_cleanupq(struct ath_softc *s
+@@ -1975,89 +1976,134 @@ void ath_tx_cleanupq(struct ath_softc *s
  	sc->tx.txqsetup &= ~(1<<txq->axq_qnum);
  }
  
@@ -662,43 +759,44 @@
 -	struct list_head *tid_list;
 -	struct ath_acq *acq;
 -	bool active = AIRTIME_ACTIVE(sc->airtime_flags);
+-
+-	if (txq->mac80211_qnum < 0)
+-		return;
 +	struct ath_empower_slice *slice;
 +	int ret;
 +	bool has_frames;
 +	struct sk_buff *skb;
 +	bool sent_something = false;
  
--	if (txq->mac80211_qnum < 0)
--		return;
-+	printk(KERN_ERR "Scheduling for TXQ [%u], currently serving slice [%u]\n", txq->axq_qnum, txq->current_slice);
-+	// Losing the lock here is fine because other threads can only add not consume
- 
 -	if (test_bit(ATH_OP_HW_RESET, &common->op_flags))
 -		return;
-+	spin_lock_bh(&sc->tx.queue_lock);
-+	if (skb_queue_empty_lockless(&sc->tx.queue)) {
-+		spin_unlock_bh(&sc->tx.queue_lock);
-+		goto out;
-+	}
++	// printk(KERN_ERR "Scheduling for TXQ [%u], currently serving slice [%u]\n", txq->axq_qnum, txq->current_slice);
++	// Losing the lock here is fine because other threads can only add not consume
  
 -	spin_lock_bh(&sc->chan_lock);
 -	rcu_read_lock();
 -	acq = &sc->cur_chan->acq[txq->mac80211_qnum];
-+	skb = __skb_peek(&sc->tx.queue);
-+	spin_unlock_bh(&sc->tx.queue_lock);
++	spin_lock_bh(&sc->tx.queue_lock);
  
 -	if (sc->cur_chan->stopped)
-+	slice = &sc->tx.slices[skb->priority];
-+	// If the slice is flagged as handled OR we are not a wildcard and someone else is, let them handle it
-+	if (slice->slice != txq->current_slice && (((sc->tx.handled_slices & BIT(slice->slice)) != 0) || ((txq->current_slice != -1) && sc->tx.inactive_queues != 0))) {
++	if (skb_queue_empty_lockless(&sc->tx.queue)) {
++		spin_unlock_bh(&sc->tx.queue_lock);
  		goto out;
--
++	}
+ 
 -begin:
 -	tid_list = &acq->acq_new;
 -	if (list_empty(tid_list)) {
 -		tid_list = &acq->acq_old;
 -		if (list_empty(tid_list))
 -			goto out;
++	skb = __skb_peek(&sc->tx.queue);
++	spin_unlock_bh(&sc->tx.queue_lock);
++
++	slice = &sc->tx.slices[skb->priority];
++	// If the slice is flagged as handled OR we are not a wildcard and someone else is, let them handle it
++	if (slice->slice != txq->current_slice && (((sc->tx.handled_slices & BIT(slice->slice)) != 0) || ((txq->current_slice != -1) && sc->tx.inactive_queues != 0))) {
++		goto out;
  	}
 -	tid = list_first_entry(tid_list, struct ath_atx_tid, list);
  
@@ -708,7 +806,20 @@
 -		list_move_tail(&tid->list, &acq->acq_old);
 -		spin_unlock_bh(&acq->lock);
 -		goto begin;
--	}
++	if (txq->axq_depth >= ATH_NON_AGGR_MIN_QDEPTH) {
++		spin_lock_bh(&sc->tx.queue_lock);
++		skb = __skb_dequeue(&sc->tx.queue);
++		spin_unlock_bh(&sc->tx.queue_lock);
++		ieee80211_free_txskb(sc->hw, skb);
++		goto out;
+ 	}
+ 
+-	if (!ath_tid_has_buffered(tid)) {
+-		spin_lock_bh(&acq->lock);
+-		if ((tid_list == &acq->acq_new) && !list_empty(&acq->acq_old))
+-			list_move_tail(&tid->list, &acq->acq_old);
+-		else {
+-			list_del_init(&tid->list);
 +	// We are holding the txq lock here, protected
 +	has_frames = txq->axq_depth > 0;
 +	if (txq->current_slice != slice->slice && !has_frames) {
@@ -718,21 +829,15 @@
 +		if (ret) {
 +			printk(KERN_ERR "Error reconfiguring slice!\n");
 + 			goto out;
-+		}
- 
--	if (!ath_tid_has_buffered(tid)) {
--		spin_lock_bh(&acq->lock);
--		if ((tid_list == &acq->acq_new) && !list_empty(&acq->acq_old))
--			list_move_tail(&tid->list, &acq->acq_old);
--		else {
--			list_del_init(&tid->list);
+ 		}
+-		spin_unlock_bh(&acq->lock);
+-		goto begin;
++
 +		if (txq->current_slice != -1) {
 +			sc->tx.handled_slices &= ~(BIT(txq->current_slice)); // Erase the slice as handled
 +		} else {
 +			sc->tx.inactive_queues &= ~(BIT(txq->axq_qnum)); // Set the current hw queue as active
- 		}
--		spin_unlock_bh(&acq->lock);
--		goto begin;
++		}
 +
 +		txq->current_slice = slice->slice;
 +
@@ -759,25 +864,29 @@
 -			spin_lock_bh(&acq->lock);
 -			list_move_tail(&tid->list, &acq->acq_old);
 -			spin_unlock_bh(&acq->lock);
-+	spin_lock_bh(&sc->tx.queue_lock);
 +	while (skb->priority == slice->slice) {
++		spin_lock_bh(&sc->tx.queue_lock);
 +		skb = __skb_dequeue(&sc->tx.queue);
++		spin_unlock_bh(&sc->tx.queue_lock);
++
 +		sent_something = true;
 +		if(ath_tx_start(sc->hw, skb, &txctl)) {
 +			printk(KERN_ERR "Failed to send! Discarding...\n");
 +			ieee80211_free_txskb(sc->hw, skb);
 +			break;
 +		}
-+		printk(KERN_ERR "Sent packet!\n");
++		// printk(KERN_ERR "Sent packet!\n");
 +
++		spin_lock_bh(&sc->tx.queue_lock);
 +		if (skb_queue_empty_lockless(&sc->tx.queue)) {
++			spin_unlock_bh(&sc->tx.queue_lock);
 +			break;
  		}
 -		goto begin;
 +
 +		skb = __skb_peek(&sc->tx.queue);
++		spin_unlock_bh(&sc->tx.queue_lock);
  	}
-+	spin_unlock_bh(&sc->tx.queue_lock);
  
  out:
 -	rcu_read_unlock();
@@ -828,7 +937,7 @@
  }
  
  /***********/
-@@ -2399,11 +2429,10 @@ int ath_tx_start(struct ieee80211_hw *hw
+@@ -2399,11 +2445,10 @@ int ath_tx_start(struct ieee80211_hw *hw
  		tid = ath_get_skb_tid(sc, an, skb);
  	}
  
@@ -843,7 +952,7 @@
  
  	bf = ath_tx_setup_buffer(sc, txq, tid, skb);
  	if (!bf) {
-@@ -2424,7 +2453,6 @@ int ath_tx_start(struct ieee80211_hw *hw
+@@ -2424,7 +2469,6 @@ int ath_tx_start(struct ieee80211_hw *hw
  	ath_tx_send_normal(sc, txq, tid, skb);
  
  out:
@@ -851,7 +960,7 @@
  
  	return 0;
  }
-@@ -2661,7 +2689,6 @@ static void ath_tx_processq(struct ath_s
+@@ -2661,7 +2705,6 @@ static void ath_tx_processq(struct ath_s
  	ath_dbg(common, QUEUE, "tx queue %d (%x), link %p\n",
  		txq->axq_qnum, ath9k_hw_gettxbuf(sc->sc_ah, txq->axq_qnum),
  		txq->axq_link);
@@ -859,7 +968,16 @@
  	ath_txq_lock(sc, txq);
  	for (;;) {
  		if (test_bit(ATH_OP_HW_RESET, &common->op_flags))
-@@ -2887,10 +2914,10 @@ void ath_tx_node_init(struct ath_softc *
+@@ -2669,7 +2712,7 @@ static void ath_tx_processq(struct ath_s
+ 
+ 		if (list_empty(&txq->axq_q)) {
+ 			txq->axq_link = NULL;
+-			ath_txq_schedule(sc, txq);
++			// ath_txq_schedule(sc, txq);
+ 			break;
+ 		}
+ 		bf = list_first_entry(&txq->axq_q, struct ath_buf, list);
+@@ -2887,10 +2930,10 @@ void ath_tx_node_init(struct ath_softc *
  	struct ath_atx_tid *tid;
  	int tidno, acno;
  
@@ -872,7 +990,7 @@
  		tid = ath_node_to_tid(an, tidno);
  		tid->an        = an;
  		tid->tidno     = tidno;
-@@ -2903,7 +2930,7 @@ void ath_tx_node_init(struct ath_softc *
+@@ -2903,7 +2946,7 @@ void ath_tx_node_init(struct ath_softc *
  		__skb_queue_head_init(&tid->retry_q);
  		INIT_LIST_HEAD(&tid->list);
  		acno = TID_TO_WME_AC(tidno);
@@ -881,7 +999,7 @@
  
  		if (!an->sta)
  			break; /* just one multicast ath_atx_tid */
-@@ -2915,10 +2942,11 @@ void ath_tx_node_cleanup(struct ath_soft
+@@ -2915,10 +2958,11 @@ void ath_tx_node_cleanup(struct ath_soft
  	struct ath_atx_tid *tid;
  	struct ath_txq *txq;
  	int tidno;
@@ -930,7 +1048,7 @@
  	u16 len_rthdr;
  	int hdrlen;
  
-+	printk(KERN_ERR "MONITOR TX FOR PRIO/Q [%u/%u]", skb->priority, skb->queue_mapping);
++	// printk(KERN_ERR "MONITOR TX FOR PRIO/Q [%u/%u]", skb->priority, skb->queue_mapping);
 +	// goto fail;
 +
  	/* check for not even having the fixed radiotap header part */
@@ -1065,7 +1183,15 @@
  	u8 *p;
 --- a/drivers/net/wireless/ath/ath9k/channel.c
 +++ b/drivers/net/wireless/ath/ath9k/channel.c
-@@ -127,11 +127,11 @@ void ath_chanctx_init(struct ath_softc *
+@@ -75,6 +75,7 @@ static int ath_set_channel(struct ath_so
+ 	}
+ 
+ 	hchan = &sc->sc_ah->channels[pos];
++	printk(KERN_ERR "Setting channel!");
+ 	r = ath_reset(sc, hchan);
+ 	if (r)
+ 		return r;
+@@ -127,11 +128,11 @@ void ath_chanctx_init(struct ath_softc *
  		INIT_LIST_HEAD(&ctx->vifs);
  		ctx->txpower = ATH_TXPOWER_MAX;
  		ctx->flush_timeout = HZ / 5; /* 200ms */
@@ -1082,7 +1208,7 @@
  	}
  }
  
-@@ -1357,11 +1357,11 @@ void ath9k_offchannel_init(struct ath_so
+@@ -1357,11 +1358,11 @@ void ath9k_offchannel_init(struct ath_so
  	ctx->txpower = ATH_TXPOWER_MAX;
  	cfg80211_chandef_create(&ctx->chandef, chan, NL80211_CHAN_HT20);
  
@@ -1169,9 +1295,29 @@
  
  	sdata->tx_conf[params->ac] = p;
  	if (drv_conf_tx(local, sdata, params->ac, &p)) {
+@@ -2141,7 +2138,7 @@ static int ieee80211_set_txq_params(stru
+ 		return -EINVAL;
+ 	}
+ 
+-	ieee80211_bss_info_change_notify(sdata, BSS_CHANGED_QOS);
++	// ieee80211_bss_info_change_notify(sdata, BSS_CHANGED_QOS);
+ 
+ 	return 0;
+ }
 --- a/net/wireless/nl80211.c
 +++ b/net/wireless/nl80211.c
-@@ -2570,9 +2570,9 @@ static int nl80211_set_wiphy(struct sk_b
+@@ -2304,9 +2304,7 @@ static int parse_txq_params(struct nlatt
+ 	txq_params->cwmax = nla_get_u16(tb[NL80211_TXQ_ATTR_CWMAX]);
+ 	txq_params->aifs = nla_get_u8(tb[NL80211_TXQ_ATTR_AIFS]);
+ 
+-	if (ac >= NL80211_NUM_ACS)
+-		return -EINVAL;
+-	txq_params->ac = array_index_nospec(ac, NL80211_NUM_ACS);
++	txq_params->ac = ac;
+ 	return 0;
+ }
+ 
+@@ -2570,9 +2568,9 @@ static int nl80211_set_wiphy(struct sk_b
  		if (!netdev)
  			return -EINVAL;
  
