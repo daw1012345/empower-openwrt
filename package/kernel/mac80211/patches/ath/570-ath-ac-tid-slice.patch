@@ -1,16 +1,18 @@
 --- a/drivers/net/wireless/ath/ath9k/ath9k.h
 +++ b/drivers/net/wireless/ath/ath9k/ath9k.h
-@@ -102,6 +102,9 @@ int ath_descdma_setup(struct ath_softc *
+@@ -102,6 +102,11 @@ int ath_descdma_setup(struct ath_softc *
  	 (((_tid) == 4) || ((_tid) == 5)) ? IEEE80211_AC_VI :	\
  	 IEEE80211_AC_VO)
  
 +#define ATH_NUM_DATA_TX_QUEUES 4
 +#define ATH_EMPOWER_DEFAULT_QUEUE 6
++#define ATH_MAX_HW_QUEUE_LEN 1024
++#define ATH_MAX_SW_QUEUE_LEN ATH_MAX_HW_QUEUE_LEN*4
 +
  #define ATH_AGGR_DELIM_SZ          4
  #define ATH_AGGR_MINPLEN           256 /* in bytes, minimum packet length */
  /* number of delimiters for encryption padding */
-@@ -173,6 +176,8 @@ struct ath_txq {
+@@ -173,6 +178,8 @@ struct ath_txq {
  	u8 txq_tailidx;
  	int pending_frames;
  	struct sk_buff_head complete_q;
@@ -19,7 +21,7 @@
  };
  
  struct ath_frame_info {
-@@ -265,7 +270,7 @@ struct ath_node {
+@@ -265,7 +272,7 @@ struct ath_node {
  
  	bool sleeping;
  	bool no_ps_filter;
@@ -28,7 +30,7 @@
  	u32 airtime_rx_start;
  
  #ifdef CPTCFG_ATH9K_STATION_STATISTICS
-@@ -286,6 +291,13 @@ struct ath_tx_control {
+@@ -286,6 +293,13 @@ struct ath_tx_control {
  };
  
  
@@ -42,7 +44,7 @@
  /**
   * @txq_map:  Index is mac80211 queue number.  This is
   *  not necessarily the same as the hardware queue number
-@@ -299,7 +311,16 @@ struct ath_tx {
+@@ -299,7 +313,16 @@ struct ath_tx {
  	struct ath_descdma txdma;
  	struct ath_txq *txq_map[IEEE80211_NUM_ACS];
  	struct ath_txq *uapsdq;
@@ -60,7 +62,7 @@
  };
  
  struct ath_rx_edma {
-@@ -336,7 +357,7 @@ struct ath_acq {
+@@ -336,7 +359,7 @@ struct ath_acq {
  struct ath_chanctx {
  	struct cfg80211_chan_def chandef;
  	struct list_head vifs;
@@ -69,7 +71,7 @@
  	int hw_queue_base;
  
  	/* do not dereference, use for comparison only */
-@@ -440,10 +461,7 @@ ath_node_to_tid(struct ath_node *an, u8
+@@ -440,10 +463,7 @@ ath_node_to_tid(struct ath_node *an, u8
  	struct ieee80211_txq *txq;
  
  	BUG_ON(!vif);
@@ -81,7 +83,7 @@
  
  	return (struct ath_atx_tid *) txq->drv_priv;
  }
-@@ -458,7 +476,7 @@ ath_node_to_tid(struct ath_node *an, u8
+@@ -458,7 +478,7 @@ ath_node_to_tid(struct ath_node *an, u8
  void ath_chanctx_init(struct ath_softc *sc);
  void ath_chanctx_set_channel(struct ath_softc *sc, struct ath_chanctx *ctx,
  			     struct cfg80211_chan_def *chandef);
@@ -90,7 +92,7 @@
  #ifdef CPTCFG_ATH9K_CHANNEL_CONTEXT
  
  static inline struct ath_chanctx *
-@@ -593,7 +611,7 @@ bool ath_drain_all_txq(struct ath_softc
+@@ -593,7 +613,7 @@ bool ath_drain_all_txq(struct ath_softc
  void ath_draintxq(struct ath_softc *sc, struct ath_txq *txq);
  void ath_tx_node_init(struct ath_softc *sc, struct ath_node *an);
  void ath_tx_node_cleanup(struct ath_softc *sc, struct ath_node *an);
@@ -99,7 +101,7 @@
  void ath_txq_schedule_all(struct ath_softc *sc);
  int ath_tx_init(struct ath_softc *sc, int nbufs);
  int ath_txq_update(struct ath_softc *sc, int qnum,
-@@ -684,6 +702,8 @@ void ath9k_calculate_iter_data(struct at
+@@ -684,6 +704,8 @@ void ath9k_calculate_iter_data(struct at
  void ath9k_calculate_summary_state(struct ath_softc *sc,
  				   struct ath_chanctx *ctx);
  void ath9k_set_txpower(struct ath_softc *sc, struct ieee80211_vif *vif);
@@ -455,7 +457,7 @@
  	if (!ath_complete_reset(sc, false))
  		ah->reset_power_on = false;
  
-@@ -761,8 +787,61 @@ static void ath9k_tx(struct ieee80211_hw
+@@ -761,8 +787,60 @@ static void ath9k_tx(struct ieee80211_hw
  	struct ath_softc *sc = hw->priv;
  	struct ath_common *common = ath9k_hw_common(sc->sc_ah);
  	struct ath_tx_control txctl;
@@ -476,14 +478,13 @@
 +	spin_unlock_bh(&sc->tx.queue_lock);
 +
 +	if (empty) {
++		memset(&txctl, 0, sizeof(struct ath_tx_control));
++		
 +		for (i = 0; i < ATH_NUM_DATA_TX_QUEUES; i++) {
 +			txq = &sc->tx.txq[i];
 +			ath_txq_lock(sc, txq);
 +			if (txq->current_slice == slice) {
-+				struct ath_tx_control txctl = {
-+					.txq = txq
-+				};
-+				
++				txctl.txq = txq;
 +				if(ath_tx_start(sc->hw, skb, &txctl)) {
 +					printk(KERN_ERR "Failed to send! Discarding...\n");
 +					ieee80211_free_txskb(sc->hw, skb);
@@ -501,8 +502,8 @@
 +
 +	// Put 
 +	spin_lock_bh(&sc->tx.queue_lock);
-+	if (skb_queue_len_lockless(&sc->tx.queue) > 4096) {
-+		printk(KERN_ERR "CONGESTED: Length of queue exceeded 255! Dropping packet...\n", skb->priority);
++	if (skb_queue_len_lockless(&sc->tx.queue) > ATH_MAX_SW_QUEUE_LEN) {
++		printk(KERN_ERR "CONGESTED: Length of queue exceeded %u! Dropping packet for %u\n", ATH_MAX_SW_QUEUE_LEN, skb->priority);
 +		spin_unlock_bh(&sc->tx.queue_lock);
 +		goto exit;
 +	}
@@ -517,7 +518,7 @@
  
  	if (sc->ps_enabled) {
  		/*
-@@ -815,7 +894,7 @@ static void ath9k_tx(struct ieee80211_hw
+@@ -815,7 +893,7 @@ static void ath9k_tx(struct ieee80211_hw
  	}
  
  	memset(&txctl, 0, sizeof(struct ath_tx_control));
@@ -526,7 +527,7 @@
  	txctl.sta = control->sta;
  
  	ath_dbg(common, XMIT, "transmitting packet, skb: %p\n", skb);
-@@ -1246,11 +1325,11 @@ static void ath9k_assign_hw_queues(struc
+@@ -1246,11 +1324,11 @@ static void ath9k_assign_hw_queues(struc
  		return;
  
  	for (i = 0; i < IEEE80211_NUM_ACS; i++)
@@ -540,7 +541,7 @@
  	else
  		vif->cab_queue = IEEE80211_INVAL_HW_QUEUE;
  }
-@@ -1646,37 +1725,57 @@ static int ath9k_conf_tx(struct ieee8021
+@@ -1646,37 +1724,57 @@ static int ath9k_conf_tx(struct ieee8021
  {
  	struct ath_softc *sc = hw->priv;
  	struct ath_common *common = ath9k_hw_common(sc->sc_ah);
@@ -620,7 +621,7 @@
  
  	return ret;
  }
-@@ -2136,7 +2235,8 @@ void __ath9k_flush(struct ieee80211_hw *
+@@ -2136,7 +2234,8 @@ void __ath9k_flush(struct ieee80211_hw *
  		spin_lock_bh(&sc->sc_pcu_lock);
  		drain_txq = ath_drain_all_txq(sc);
  		spin_unlock_bh(&sc->sc_pcu_lock);
@@ -795,6 +796,7 @@
 -	if (txq->mac80211_qnum < 0)
 -		return;
 +	struct ath_empower_slice *slice;
++	struct ath_tx_control txctl;
 +	int ret;
 +	bool has_frames;
 +	struct sk_buff *skb;
@@ -876,9 +878,8 @@
 +		goto out;
  	}
  
-+	struct ath_tx_control txctl = {
-+		.txq = txq
-+	};
++	memset(&txctl, 0, sizeof(struct ath_tx_control));
++	txctl.txq = txq;
  
 -	/*
 -	 * If we succeed in scheduling something, immediately restart to make
@@ -899,15 +900,15 @@
 +			printk(KERN_ERR "Failed to send! Discarding...\n");
 +			ieee80211_free_txskb(sc->hw, skb);
 +			break;
-+		}
+ 		}
+-		goto begin;
 +		// printk(KERN_ERR "Sent packet!\n");
 +
 +		spin_lock_bh(&sc->tx.queue_lock);
 +		if (skb_queue_empty_lockless(&sc->tx.queue)) {
 +			spin_unlock_bh(&sc->tx.queue_lock);
 +			break;
- 		}
--		goto begin;
++		}
 +
 +		skb = __skb_peek(&sc->tx.queue);
 +		spin_unlock_bh(&sc->tx.queue_lock);
@@ -962,22 +963,36 @@
  }
  
  /***********/
-@@ -2399,11 +2437,10 @@ int ath_tx_start(struct ieee80211_hw *hw
+@@ -2374,6 +2412,12 @@ int ath_tx_start(struct ieee80211_hw *hw
+ 	bool ps_resp;
+ 	int q, ret;
+ 
++	if (txctl->txq->axq_depth > ATH_MAX_HW_QUEUE_LEN) {
++		printk(KERN_ERR "CONGESTED: Length of queue exceeded %u! Dropping packet for %u\n", ATH_MAX_HW_QUEUE_LEN, skb->priority);
++		ieee80211_free_txskb(sc->hw, skb);
++		goto out;
++	}
++
+ 	if (vif)
+ 		avp = (void *)vif->drv_priv;
+ 
+@@ -2399,11 +2443,10 @@ int ath_tx_start(struct ieee80211_hw *hw
  		tid = ath_get_skb_tid(sc, an, skb);
  	}
  
 -	ath_txq_lock(sc, txq);
 -	if (txq == sc->tx.txq_map[q]) {
 -		fi->txq = q;
-+	// if (txq == sc->tx.txq_map[q]) {
-+		// fi->txq = q;
- 		++txq->pending_frames;
+-		++txq->pending_frames;
 -	}
++	// if (txq == sc->tx.txq_map[q]) {
++	fi->txq = txq->axq_qnum;
++	++txq->pending_frames;
 +	// }
  
  	bf = ath_tx_setup_buffer(sc, txq, tid, skb);
  	if (!bf) {
-@@ -2424,7 +2461,6 @@ int ath_tx_start(struct ieee80211_hw *hw
+@@ -2424,7 +2467,6 @@ int ath_tx_start(struct ieee80211_hw *hw
  	ath_tx_send_normal(sc, txq, tid, skb);
  
  out:
@@ -985,7 +1000,7 @@
  
  	return 0;
  }
-@@ -2661,7 +2697,6 @@ static void ath_tx_processq(struct ath_s
+@@ -2661,7 +2703,6 @@ static void ath_tx_processq(struct ath_s
  	ath_dbg(common, QUEUE, "tx queue %d (%x), link %p\n",
  		txq->axq_qnum, ath9k_hw_gettxbuf(sc->sc_ah, txq->axq_qnum),
  		txq->axq_link);
@@ -993,7 +1008,7 @@
  	ath_txq_lock(sc, txq);
  	for (;;) {
  		if (test_bit(ATH_OP_HW_RESET, &common->op_flags))
-@@ -2669,7 +2704,7 @@ static void ath_tx_processq(struct ath_s
+@@ -2669,7 +2710,7 @@ static void ath_tx_processq(struct ath_s
  
  		if (list_empty(&txq->axq_q)) {
  			txq->axq_link = NULL;
@@ -1002,7 +1017,7 @@
  			break;
  		}
  		bf = list_first_entry(&txq->axq_q, struct ath_buf, list);
-@@ -2887,10 +2922,10 @@ void ath_tx_node_init(struct ath_softc *
+@@ -2887,10 +2928,10 @@ void ath_tx_node_init(struct ath_softc *
  	struct ath_atx_tid *tid;
  	int tidno, acno;
  
@@ -1015,7 +1030,7 @@
  		tid = ath_node_to_tid(an, tidno);
  		tid->an        = an;
  		tid->tidno     = tidno;
-@@ -2903,7 +2938,7 @@ void ath_tx_node_init(struct ath_softc *
+@@ -2903,7 +2944,7 @@ void ath_tx_node_init(struct ath_softc *
  		__skb_queue_head_init(&tid->retry_q);
  		INIT_LIST_HEAD(&tid->list);
  		acno = TID_TO_WME_AC(tidno);
@@ -1024,7 +1039,7 @@
  
  		if (!an->sta)
  			break; /* just one multicast ath_atx_tid */
-@@ -2915,10 +2950,11 @@ void ath_tx_node_cleanup(struct ath_soft
+@@ -2915,10 +2956,11 @@ void ath_tx_node_cleanup(struct ath_soft
  	struct ath_atx_tid *tid;
  	struct ath_txq *txq;
  	int tidno;
