@@ -1,0 +1,75 @@
+--- a/drivers/net/wireless/ath/ath9k/main.c
++++ b/drivers/net/wireless/ath/ath9k/main.c
+@@ -819,6 +819,7 @@ static void ath9k_tx(struct ieee80211_hw
+ 	txctl.sta = control->sta;
+ 
+ 	ath_dbg(common, XMIT, "transmitting packet, skb: %p\n", skb);
++	// printk(KERN_ERR "TX packet: %u", skb_get_queue_mapping(skb));
+ 
+ 	if (ath_tx_start(hw, skb, &txctl) != 0) {
+ 		ath_dbg(common, XMIT, "TX failed\n");
+@@ -1665,8 +1666,7 @@ static int ath9k_conf_tx(struct ieee8021
+ 	qi.tqi_cwmax = params->cw_max;
+ 	qi.tqi_burstTime = params->txop * 32;
+ 
+-	ath_dbg(common, CONFIG,
+-		"Configure tx [queue/halq] [%d/%d], aifs: %d, cw_min: %d, cw_max: %d, txop: %d\n",
++	printk(KERN_ERR "Configure tx [queue/halq] [%d/%d], aifs: %d, cw_min: %d, cw_max: %d, txop: %d\n",
+ 		queue, txq->axq_qnum, params->aifs, params->cw_min,
+ 		params->cw_max, params->txop);
+ 
+--- a/net/mac80211/iface.c
++++ b/net/mac80211/iface.c
+@@ -1249,6 +1249,8 @@ static u16 ieee80211_monitor_select_queu
+ 	if (local->hw.queues < IEEE80211_NUM_ACS)
+ 		return 0;
+ 
++	return skb->priority;
++
+ 	if (skb->len < 4 ||
+ 	    skb->len < le16_to_cpu(rtap->it_len) + 2 /* frame control */)
+ 		return 0; /* doesn't matter, frame will be dropped */
+--- a/net/wireless/nl80211.c
++++ b/net/wireless/nl80211.c
+@@ -2570,9 +2570,10 @@ static int nl80211_set_wiphy(struct sk_b
+ 		if (!netdev)
+ 			return -EINVAL;
+ 
+-		if (netdev->ieee80211_ptr->iftype != NL80211_IFTYPE_AP &&
+-		    netdev->ieee80211_ptr->iftype != NL80211_IFTYPE_P2P_GO)
+-			return -EINVAL;
++		// We want to allow this in monitor mode as well
++		// if (netdev->ieee80211_ptr->iftype != NL80211_IFTYPE_AP &&
++		//     netdev->ieee80211_ptr->iftype != NL80211_IFTYPE_P2P_GO)
++		// 	return -EINVAL;
+ 
+ 		if (!netif_running(netdev))
+ 			return -ENETDOWN;
+--- a/net/mac80211/driver-ops.c
++++ b/net/mac80211/driver-ops.c
+@@ -166,8 +166,8 @@ int drv_conf_tx(struct ieee80211_local *
+ 
+ 	might_sleep();
+ 
+-	if (!check_sdata_in_driver(sdata))
+-		return -EIO;
++	// if (!check_sdata_in_driver(sdata))
++	// 	return -EIO;
+ 
+ 	if (params->cw_min == 0 || params->cw_min > params->cw_max) {
+ 		/*
+--- a/drivers/net/wireless/ath/ath9k/xmit.c
++++ b/drivers/net/wireless/ath/ath9k/xmit.c
+@@ -2400,6 +2400,12 @@ int ath_tx_start(struct ieee80211_hw *hw
+ 	}
+ 
+ 	ath_txq_lock(sc, txq);
++
++	if (txq->pending_frames > 32) {
++		ieee80211_free_txskb(sc->hw, skb);
++		goto out;
++	}
++	
+ 	if (txq == sc->tx.txq_map[q]) {
+ 		fi->txq = q;
+ 		++txq->pending_frames;

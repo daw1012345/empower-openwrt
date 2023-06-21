@@ -1,0 +1,36 @@
+--- a/net/packet/af_packet.c
++++ b/net/packet/af_packet.c
+@@ -2015,6 +2015,10 @@ retry:
+ 	skb->priority = sk->sk_priority;
+ 	skb->mark = sk->sk_mark;
+ 
++	if ((msg->msg_flags >> 16) != 0) {
++		skb->priority = (msg->msg_flags >> 16);
++	}
++
+ 	sock_tx_timestamp(sk, sockc.tsflags, &skb_shinfo(skb)->tx_flags);
+ 
+ 	if (unlikely(extra_len == 4))
+@@ -2789,6 +2793,11 @@ static int tpacket_snd(struct packet_soc
+ 		}
+ 		tp_len = tpacket_fill_skb(po, skb, ph, dev, data, tp_len, proto,
+ 					  addr, hlen, copylen, &sockc);
++
++		if ((msg->msg_flags >> 16) != 0) {
++			skb->priority = (msg->msg_flags >> 16);
++		}
++
+ 		if (likely(tp_len >= 0) &&
+ 		    tp_len > dev->mtu + reserve &&
+ 		    !po->has_vnet_hdr &&
+@@ -3010,6 +3019,10 @@ static int packet_snd(struct socket *soc
+ 	skb->priority = sk->sk_priority;
+ 	skb->mark = sockc.mark;
+ 
++	if ((msg->msg_flags >> 16) != 0) {
++		skb->priority = (msg->msg_flags >> 16);
++	}
++
+ 	if (has_vnet_hdr) {
+ 		err = virtio_net_hdr_to_skb(skb, &vnet_hdr, vio_le());
+ 		if (err)
