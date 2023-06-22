@@ -46,6 +46,33 @@
  		queue, txq->axq_qnum, params->aifs, params->cw_min,
  		params->cw_max, params->txop);
  
+@@ -2446,7 +2449,7 @@ static int ath9k_add_chanctx(struct ieee
+ 		*ptr = ctx;
+ 		ctx->assigned = true;
+ 		pos = ctx - &sc->chanctx[0];
+-		ctx->hw_queue_base = pos * IEEE80211_NUM_ACS;
++		ctx->hw_queue_base = pos * EMP_NUM_USE_QUEUE;
+ 
+ 		ath_dbg(common, CHAN_CTX,
+ 			"Add channel context: %d MHz\n",
+@@ -2522,7 +2525,7 @@ static int ath9k_assign_vif_chanctx(stru
+ 	ctx->nvifs_assigned++;
+ 	list_add_tail(&avp->list, &ctx->vifs);
+ 	ath9k_calculate_summary_state(sc, ctx);
+-	for (i = 0; i < IEEE80211_NUM_ACS; i++)
++	for (i = 0; i < EMP_NUM_USE_QUEUE; i++)
+ 		vif->hw_queue[i] = ctx->hw_queue_base + i;
+ 
+ 	mutex_unlock(&sc->mutex);
+@@ -2553,7 +2556,7 @@ static void ath9k_unassign_vif_chanctx(s
+ 	ctx->nvifs_assigned--;
+ 	list_del(&avp->list);
+ 	ath9k_calculate_summary_state(sc, ctx);
+-	for (ac = 0; ac < IEEE80211_NUM_ACS; ac++)
++	for (ac = 0; ac < EMP_NUM_USE_QUEUE; ac++)
+ 		vif->hw_queue[ac] = IEEE80211_INVAL_HW_QUEUE;
+ 
+ 	mutex_unlock(&sc->mutex);
 --- a/net/mac80211/iface.c
 +++ b/net/mac80211/iface.c
 @@ -1246,9 +1246,11 @@ static u16 ieee80211_monitor_select_queu
@@ -155,7 +182,7 @@
  
  	ath_txq_lock(sc, txq);
 +
-+	if (txq->pending_frames > 32) {
++	if (txq->pending_frames > EMP_MAX_BUF_USAGE) {
 +		ieee80211_free_txskb(sc->hw, skb);
 +		goto out;
 +	}
@@ -165,24 +192,54 @@
  		++txq->pending_frames;
 --- a/drivers/net/wireless/ath/ath9k/ath9k.h
 +++ b/drivers/net/wireless/ath/ath9k/ath9k.h
-@@ -286,6 +286,8 @@ struct ath_tx_control {
- };
- 
+@@ -114,6 +114,9 @@ int ath_descdma_setup(struct ath_softc *
+ #define ATH_TXFIFO_DEPTH           8
+ #define ATH_TX_ERROR               0x01
  
 +#define EMP_NUM_USE_QUEUE  5
++#define EMP_MAX_BUF_USAGE  32
 +
+ #define ATH_AIRTIME_QUANTUM        300 /* usec */
+ 
+ /* Stop tx traffic 1ms before the GO goes away */
+@@ -265,7 +268,7 @@ struct ath_node {
+ 
+ 	bool sleeping;
+ 	bool no_ps_filter;
+-	s64 airtime_deficit[IEEE80211_NUM_ACS];
++	s64 airtime_deficit[EMP_NUM_USE_QUEUE];
+ 	u32 airtime_rx_start;
+ 
+ #ifdef CPTCFG_ATH9K_STATION_STATISTICS
+@@ -285,7 +288,6 @@ struct ath_tx_control {
+ 	u8 paprd;
+ };
+ 
+-
  /**
   * @txq_map:  Index is mac80211 queue number.  This is
   *  not necessarily the same as the hardware queue number
-@@ -297,7 +299,7 @@ struct ath_tx {
+@@ -297,9 +299,9 @@ struct ath_tx {
  	struct list_head txbuf;
  	struct ath_txq txq[ATH9K_NUM_TX_QUEUES];
  	struct ath_descdma txdma;
 -	struct ath_txq *txq_map[IEEE80211_NUM_ACS];
 +	struct ath_txq *txq_map[EMP_NUM_USE_QUEUE];
  	struct ath_txq *uapsdq;
- 	u16 max_aggr_framelen[IEEE80211_NUM_ACS][4][32];
+-	u16 max_aggr_framelen[IEEE80211_NUM_ACS][4][32];
++	u16 max_aggr_framelen[EMP_NUM_USE_QUEUE][4][32];
  };
+ 
+ struct ath_rx_edma {
+@@ -336,7 +338,7 @@ struct ath_acq {
+ struct ath_chanctx {
+ 	struct cfg80211_chan_def chandef;
+ 	struct list_head vifs;
+-	struct ath_acq acq[IEEE80211_NUM_ACS];
++	struct ath_acq acq[EMP_NUM_USE_QUEUE];
+ 	int hw_queue_base;
+ 
+ 	/* do not dereference, use for comparison only */
 --- a/drivers/net/wireless/ath/ath9k/link.c
 +++ b/drivers/net/wireless/ath/ath9k/link.c
 @@ -28,7 +28,7 @@ static bool ath_tx_complete_check(struct
@@ -196,19 +253,32 @@
  		ath_txq_lock(sc, txq);
 --- a/drivers/net/wireless/ath/ath9k/init.c
 +++ b/drivers/net/wireless/ath/ath9k/init.c
-@@ -411,9 +411,9 @@ static int ath9k_init_queues(struct ath_
- 	sc->beacon.cabq = ath_txq_setup(sc, ATH9K_TX_QUEUE_CAB, 0);
- 	ath_cabq_update(sc);
+@@ -408,15 +408,21 @@ static int ath9k_init_queues(struct ath_
+ 	int i = 0;
+ 
+ 	sc->beacon.beaconq = ath9k_hw_beaconq_setup(sc->sc_ah);
+-	sc->beacon.cabq = ath_txq_setup(sc, ATH9K_TX_QUEUE_CAB, 0);
+-	ath_cabq_update(sc);
++	// sc->beacon.cabq = ath_txq_setup(sc, ATH9K_TX_QUEUE_CAB, 0);
++	// ath_cabq_update(sc);
  
 -	sc->tx.uapsdq = ath_txq_setup(sc, ATH9K_TX_QUEUE_UAPSD, 0);
 +	// sc->tx.uapsdq = ath_txq_setup(sc, ATH9K_TX_QUEUE_UAPSD, 0);
  
--	for (i = 0; i < IEEE80211_NUM_ACS; i++) {
-+	for (i = 0; i < EMP_NUM_USE_QUEUE; i++) {
+ 	for (i = 0; i < IEEE80211_NUM_ACS; i++) {
  		sc->tx.txq_map[i] = ath_txq_setup(sc, ATH9K_TX_QUEUE_DATA, i);
  		sc->tx.txq_map[i]->mac80211_qnum = i;
++		printk(KERN_ERR "Init queue. slice=[%u], HALQ=[%u]", i, sc->tx.txq_map[i]->axq_qnum);
  	}
-@@ -986,7 +986,7 @@ static void ath9k_set_hw_capab(struct at
++
++	sc->tx.txq_map[4] = ath_txq_setup(sc, ATH9K_TX_QUEUE_DATA, (ATH9K_NUM_TX_QUEUES - 2));
++	sc->tx.txq_map[4]->mac80211_qnum = 4;
++	printk(KERN_ERR "Init queue. slice=[%u], HALQ=[%u]", 4, sc->tx.txq_map[4]->axq_qnum);
++
+ 	return 0;
+ }
+ 
+@@ -986,7 +992,7 @@ static void ath9k_set_hw_capab(struct at
  	hw->wiphy->flags |= WIPHY_FLAG_HAS_CHANNEL_SWITCH;
  	hw->wiphy->flags |= WIPHY_FLAG_AP_UAPSD;
  
@@ -217,3 +287,59 @@
  	hw->max_rates = 4;
  	hw->max_listen_interval = 10;
  	hw->max_rate_tries = 10;
+--- a/drivers/net/wireless/ath/ath9k/channel.c
++++ b/drivers/net/wireless/ath/ath9k/channel.c
+@@ -1399,7 +1399,7 @@ void ath9k_chanctx_stop_queues(struct at
+ 		ieee80211_stop_queue(sc->hw,
+ 				     sc->hw->offchannel_tx_hw_queue);
+ 	} else {
+-		for (i = 0; i < IEEE80211_NUM_ACS; i++)
++		for (i = 0; i < EMP_NUM_USE_QUEUE; i++)
+ 			ieee80211_stop_queue(sc->hw,
+ 					     ctx->hw_queue_base + i);
+ 	}
+@@ -1418,7 +1418,7 @@ void ath9k_chanctx_wake_queues(struct at
+ 		ieee80211_wake_queue(sc->hw,
+ 				     sc->hw->offchannel_tx_hw_queue);
+ 	} else {
+-		for (i = 0; i < IEEE80211_NUM_ACS; i++)
++		for (i = 0; i < EMP_NUM_USE_QUEUE; i++)
+ 			ieee80211_wake_queue(sc->hw,
+ 					     ctx->hw_queue_base + i);
+ 	}
+--- a/drivers/net/wireless/ath/ath9k/debug.c
++++ b/drivers/net/wireless/ath/ath9k/debug.c
+@@ -639,18 +639,14 @@ static int read_file_queues(struct seq_f
+ 	struct ath_softc *sc = hw->priv;
+ 	struct ath_txq *txq;
+ 	int i;
+-	static const char *qname[4] = {
+-		"VO", "VI", "BE", "BK"
+-	};
+ 
+-	for (i = 0; i < IEEE80211_NUM_ACS; i++) {
++	for (i = 0; i < EMP_NUM_USE_QUEUE; i++) {
+ 		txq = sc->tx.txq_map[i];
+-		seq_printf(file, "(%s):  ", qname[i]);
+ 		print_queue(sc, txq, file);
+ 	}
+ 
+-	seq_puts(file, "(CAB): ");
+-	print_queue(sc, sc->beacon.cabq, file);
++	// seq_puts(file, "(CAB): ");
++	// print_queue(sc, sc->beacon.cabq, file);
+ 
+ 	return 0;
+ }
+--- a/drivers/net/wireless/ath/ath9k/beacon.c
++++ b/drivers/net/wireless/ath/ath9k/beacon.c
+@@ -395,6 +395,9 @@ void ath9k_beacon_tasklet(unsigned long
+ 	bool edma = !!(ah->caps.hw_caps & ATH9K_HW_CAP_EDMA);
+ 	int slot;
+ 
++	printk_once(KERN_ERR "Ifnoring beacon tasklet!\n");
++	return;
++
+ 	if (test_bit(ATH_OP_HW_RESET, &common->op_flags)) {
+ 		ath_dbg(common, RESET,
+ 			"reset work is pending, skip beaconing now\n");
